@@ -20,6 +20,9 @@
 #include <linux/err.h>
 #include <linux/vfio.h>
 #include <linux/vmalloc.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/signal.h>
+
 #include <asm/iommu.h>
 #include <asm/tce.h>
 #include <asm/mmu_context.h>
@@ -195,6 +198,11 @@ static long tce_iommu_register_pages(struct tce_container *container,
 		return ret;
 
 	tcemem = kzalloc(sizeof(*tcemem), GFP_KERNEL);
+	if (!tcemem) {
+		mm_iommu_put(container->mm, mem);
+		return -ENOMEM;
+	}
+
 	tcemem->mem = mem;
 	list_add(&tcemem->next, &container->prereg_list);
 
@@ -499,6 +507,8 @@ static int tce_iommu_clear(struct tce_container *container,
 	enum dma_data_direction direction;
 
 	for ( ; pages; --pages, ++entry) {
+		cond_resched();
+
 		direction = DMA_NONE;
 		oldhpa = 0;
 		ret = iommu_tce_xchg(tbl, entry, &oldhpa, &direction);
@@ -677,7 +687,7 @@ static void tce_iommu_free_table(struct tce_container *container,
 	unsigned long pages = tbl->it_allocated_size >> PAGE_SHIFT;
 
 	tce_iommu_userspace_view_free(tbl, container->mm);
-	tbl->it_ops->free(tbl);
+	iommu_tce_table_put(tbl);
 	decrement_locked_vm(container->mm, pages);
 }
 
@@ -1332,8 +1342,16 @@ static int tce_iommu_attach_group(void *iommu_data,
 
 	if (!table_group->ops || !table_group->ops->take_ownership ||
 			!table_group->ops->release_ownership) {
+		if (container->v2) {
+			ret = -EPERM;
+			goto unlock_exit;
+		}
 		ret = tce_iommu_take_ownership(container, table_group);
 	} else {
+		if (!container->v2) {
+			ret = -EPERM;
+			goto unlock_exit;
+		}
 		ret = tce_iommu_take_ownership_ddw(container, table_group);
 		if (!tce_groups_attached(container) && !container->tables[0])
 			container->def_window_pending = true;
