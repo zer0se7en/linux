@@ -599,7 +599,8 @@ static const struct regmap_config s10_sdram_regmap_cfg = {
 	.volatile_reg = s10_sdram_volatile_reg,
 	.reg_read = s10_protected_reg_read,
 	.reg_write = s10_protected_reg_write,
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 
 static int altr_s10_sdram_probe(struct platform_device *pdev)
@@ -730,7 +731,8 @@ static int altr_s10_sdram_probe(struct platform_device *pdev)
 			 S10_DDR0_IRQ_MASK)) {
 		edac_printk(KERN_ERR, EDAC_MC,
 			    "Error clearing SDRAM ECC count\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err2;
 	}
 
 	if (regmap_update_bits(drvdata->mc_vbase, priv->ecc_irq_en_offset,

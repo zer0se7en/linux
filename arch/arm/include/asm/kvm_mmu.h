@@ -75,17 +75,9 @@ phys_addr_t kvm_get_idmap_vector(void);
 int kvm_mmu_init(void);
 void kvm_clear_hyp_idmap(void);
 
-static inline void kvm_set_pmd(pmd_t *pmd, pmd_t new_pmd)
-{
-	*pmd = new_pmd;
-	dsb(ishst);
-}
-
-static inline void kvm_set_pte(pte_t *pte, pte_t new_pte)
-{
-	*pte = new_pte;
-	dsb(ishst);
-}
+#define kvm_mk_pmd(ptep)	__pmd(__pa(ptep) | PMD_TYPE_TABLE)
+#define kvm_mk_pud(pmdp)	__pud(__pa(pmdp) | PMD_TYPE_TABLE)
+#define kvm_mk_pgd(pudp)	({ BUILD_BUG(); 0; })
 
 static inline pte_t kvm_s2pte_mkwrite(pte_t pte)
 {
@@ -362,6 +354,11 @@ static inline int hyp_map_aux_data(void)
 }
 
 #define kvm_phys_to_vttbr(addr)		(addr)
+
+static inline bool kvm_cpu_has_cnp(void)
+{
+	return false;
+}
 
 #endif	/* !__ASSEMBLY__ */
 
