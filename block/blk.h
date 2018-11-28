@@ -169,7 +169,7 @@ static inline bool biovec_phys_mergeable(struct request_queue *q,
 static inline bool __bvec_gap_to_prev(struct request_queue *q,
 		struct bio_vec *bprv, unsigned int offset)
 {
-	return offset ||
+	return (offset & queue_virt_boundary(q)) ||
 		((bprv->bv_offset + bprv->bv_len) & queue_virt_boundary(q));
 }
 
@@ -396,6 +396,16 @@ static inline unsigned long blk_rq_deadline(struct request *rq)
 }
 
 /*
+ * The max size one bio can handle is UINT_MAX becasue bvec_iter.bi_size
+ * is defined as 'unsigned int', meantime it has to aligned to with logical
+ * block size which is the minimum accepted unit by hardware.
+ */
+static inline unsigned int bio_allowed_max_sectors(struct request_queue *q)
+{
+	return round_down(UINT_MAX, queue_logical_block_size(q)) >> 9;
+}
+
+/*
  * Internal io_context interface
  */
 void get_io_context(struct io_context *ioc);
@@ -486,6 +496,14 @@ extern void blk_drain_queue(struct request_queue *q);
 extern int blk_iolatency_init(struct request_queue *q);
 #else
 static inline int blk_iolatency_init(struct request_queue *q) { return 0; }
+#endif
+
+struct bio *blk_next_bio(struct bio *bio, unsigned int nr_pages, gfp_t gfp);
+
+#ifdef CONFIG_BLK_DEV_ZONED
+void blk_queue_free_zone_bitmaps(struct request_queue *q);
+#else
+static inline void blk_queue_free_zone_bitmaps(struct request_queue *q) {}
 #endif
 
 #endif /* BLK_INTERNAL_H */

@@ -153,7 +153,7 @@ struct iolatency_grp {
 #define BLKIOLATENCY_MAX_WIN_SIZE NSEC_PER_SEC
 /*
  * These are the constants used to fake the fixed-point moving average
- * calculation just like load average.  The call to CALC_LOAD folds
+ * calculation just like load average.  The call to calc_load() folds
  * (FIXED_1 (2048) - exp_factor) * new_sample into lat_avg.  The sampling
  * window size is bucketed to try to approximately calculate average
  * latency such that 1/exp (decay rate) is [1 min, 2.5 min) when windows
@@ -248,7 +248,7 @@ static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
 		return;
 
 	/*
-	 * CALC_LOAD takes in a number stored in fixed point representation.
+	 * calc_load() takes in a number stored in fixed point representation.
 	 * Because we are using this for IO time in ns, the values stored
 	 * are significantly larger than the FIXED_1 denominator (2048).
 	 * Therefore, rounding errors in the calculation are negligible and
@@ -257,7 +257,9 @@ static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
 	exp_idx = min_t(int, BLKIOLATENCY_NR_EXP_FACTORS - 1,
 			div64_u64(iolat->cur_win_nsec,
 				  BLKIOLATENCY_EXP_BUCKET_SIZE));
-	CALC_LOAD(iolat->lat_avg, iolatency_exp_factors[exp_idx], stat->rqs.mean);
+	iolat->lat_avg = calc_load(iolat->lat_avg,
+				   iolatency_exp_factors[exp_idx],
+				   stat->rqs.mean);
 }
 
 static inline bool iolatency_may_queue(struct iolatency_grp *iolat,
@@ -480,12 +482,34 @@ static void blkcg_iolatency_throttle(struct rq_qos *rqos, struct bio *bio,
 				     spinlock_t *lock)
 {
 	struct blk_iolatency *blkiolat = BLKIOLATENCY(rqos);
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg *blkcg;
+	struct blkcg_gq *blkg;
+	struct request_queue *q = rqos->q;
 	bool issue_as_root = bio_issue_as_root_blkg(bio);
 
 	if (!blk_iolatency_enabled(blkiolat))
 		return;
 
+	rcu_read_lock();
+	blkcg = bio_blkcg(bio);
+	bio_associate_blkcg(bio, &blkcg->css);
+	blkg = blkg_lookup(blkcg, q);
+	if (unlikely(!blkg)) {
+		if (!lock)
+			spin_lock_irq(q->queue_lock);
+		blkg = blkg_lookup_create(blkcg, q);
+		if (IS_ERR(blkg))
+			blkg = NULL;
+		if (!lock)
+			spin_unlock_irq(q->queue_lock);
+	}
+	if (!blkg)
+		goto out;
+
+	bio_issue_init(&bio->bi_issue, bio_sectors(bio));
+	bio_associate_blkg(bio, blkg);
+out:
+	rcu_read_unlock();
 	while (blkg && blkg->parent) {
 		struct iolatency_grp *iolat = blkg_to_lat(blkg);
 		if (!iolat) {
@@ -706,7 +730,7 @@ static void blkiolatency_timer_fn(struct timer_list *t)
 		 * We could be exiting, don't access the pd unless we have a
 		 * ref on the blkg.
 		 */
-		if (!blkg_tryget(blkg))
+		if (!blkg_try_get(blkg))
 			continue;
 
 		iolat = blkg_to_lat(blkg);
