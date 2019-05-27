@@ -154,8 +154,10 @@ int intel_pasid_alloc_table(struct device *dev)
 	order = size ? get_order(size) : 0;
 	pages = alloc_pages_node(info->iommu->node,
 				 GFP_KERNEL | __GFP_ZERO, order);
-	if (!pages)
+	if (!pages) {
+		kfree(pasid_table);
 		return -ENOMEM;
+	}
 
 	pasid_table->table = page_address(pages);
 	pasid_table->order = order;
@@ -466,8 +468,8 @@ void intel_pasid_tear_down_entry(struct intel_iommu *iommu,
 	if (WARN_ON(!pte))
 		return;
 
-	intel_pasid_clear_entry(dev, pasid);
 	did = pasid_get_domain_id(pte);
+	intel_pasid_clear_entry(dev, pasid);
 
 	if (!ecap_coherent(iommu->ecap))
 		clflush_cache_range(pte, sizeof(*pte));

@@ -588,7 +588,7 @@ static int spufs_pipe_open(struct inode *inode, struct file *file)
 	struct spufs_inode_info *i = SPUFS_I(inode);
 	file->private_data = i->i_ctx;
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 /*
@@ -2338,9 +2338,8 @@ static int spufs_switch_log_open(struct inode *inode, struct file *file)
 		goto out;
 	}
 
-	ctx->switch_log = kmalloc(sizeof(struct switch_log) +
-		SWITCH_LOG_BUFSIZE * sizeof(struct switch_log_entry),
-		GFP_KERNEL);
+	ctx->switch_log = kmalloc(struct_size(ctx->switch_log, log,
+				  SWITCH_LOG_BUFSIZE), GFP_KERNEL);
 
 	if (!ctx->switch_log) {
 		rc = -ENOMEM;

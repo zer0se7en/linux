@@ -11,6 +11,7 @@
  * General Public License for more details.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include <linux/moduleparam.h>
 #include <linux/vmalloc.h>
 #include <linux/device.h>
 #include <linux/ndctl.h>
@@ -24,6 +25,10 @@
 #include "nd.h"
 
 static DEFINE_IDA(dimm_ida);
+
+static bool noblk;
+module_param(noblk, bool, 0444);
+MODULE_PARM_DESC(noblk, "force disable BLK / local alias support");
 
 /*
  * Retrieve bus and dimm handle and return if this bus supports
@@ -53,7 +58,7 @@ static int validate_dimm(struct nvdimm_drvdata *ndd)
 
 	rc = nvdimm_check_config_data(ndd->dev);
 	if (rc)
-		dev_dbg(ndd->dev, "%pf: %s error: %d\n",
+		dev_dbg(ndd->dev, "%ps: %s error: %d\n",
 				__builtin_return_address(0), __func__, rc);
 	return rc;
 }
@@ -551,6 +556,8 @@ struct nvdimm *__nvdimm_create(struct nvdimm_bus *nvdimm_bus,
 
 	nvdimm->dimm_id = dimm_id;
 	nvdimm->provider_data = provider_data;
+	if (noblk)
+		flags |= 1 << NDD_NOBLK;
 	nvdimm->flags = flags;
 	nvdimm->cmd_mask = cmd_mask;
 	nvdimm->num_flush = num_flush;

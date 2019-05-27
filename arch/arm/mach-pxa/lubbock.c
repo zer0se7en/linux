@@ -39,7 +39,7 @@
 #include <asm/mach-types.h>
 #include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/sizes.h>
+#include <linux/sizes.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -197,7 +197,7 @@ static struct platform_device sa1111_device = {
  * (to J5) and poking board registers (as done below).  Else it's only useful
  * for the temperature sensors.
  */
-static struct pxa2xx_spi_master pxa_ssp_master_info = {
+static struct pxa2xx_spi_controller pxa_ssp_master_info = {
 	.num_chipselect	= 1,
 };
 

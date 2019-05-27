@@ -26,7 +26,6 @@
 #include <linux/interrupt.h>
 #include <linux/irqdomain.h>
 #include <linux/list.h>
-#include <linux/list_sort.h>
 #include <linux/log2.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
@@ -1179,7 +1178,7 @@ static void its_irq_compose_msi_msg(struct irq_data *d, struct msi_msg *msg)
 	msg->address_hi		= upper_32_bits(addr);
 	msg->data		= its_get_event_id(d);
 
-	iommu_dma_map_msi_msg(d->irq, msg);
+	iommu_dma_compose_msi_msg(irq_data_get_msi_desc(d), msg);
 }
 
 static int its_irq_set_irqchip_state(struct irq_data *d,
@@ -1465,39 +1464,13 @@ static struct lpi_range *mk_lpi_range(u32 base, u32 span)
 {
 	struct lpi_range *range;
 
-	range = kzalloc(sizeof(*range), GFP_KERNEL);
+	range = kmalloc(sizeof(*range), GFP_KERNEL);
 	if (range) {
-		INIT_LIST_HEAD(&range->entry);
 		range->base_id = base;
 		range->span = span;
 	}
 
 	return range;
-}
-
-static int lpi_range_cmp(void *priv, struct list_head *a, struct list_head *b)
-{
-	struct lpi_range *ra, *rb;
-
-	ra = container_of(a, struct lpi_range, entry);
-	rb = container_of(b, struct lpi_range, entry);
-
-	return rb->base_id - ra->base_id;
-}
-
-static void merge_lpi_ranges(void)
-{
-	struct lpi_range *range, *tmp;
-
-	list_for_each_entry_safe(range, tmp, &lpi_range_list, entry) {
-		if (!list_is_last(&range->entry, &lpi_range_list) &&
-		    (tmp->base_id == (range->base_id + range->span))) {
-			tmp->base_id = range->base_id;
-			tmp->span += range->span;
-			list_del(&range->entry);
-			kfree(range);
-		}
-	}
 }
 
 static int alloc_lpi_range(u32 nr_lpis, u32 *base)
@@ -1529,25 +1502,49 @@ static int alloc_lpi_range(u32 nr_lpis, u32 *base)
 	return err;
 }
 
+static void merge_lpi_ranges(struct lpi_range *a, struct lpi_range *b)
+{
+	if (&a->entry == &lpi_range_list || &b->entry == &lpi_range_list)
+		return;
+	if (a->base_id + a->span != b->base_id)
+		return;
+	b->base_id = a->base_id;
+	b->span += a->span;
+	list_del(&a->entry);
+	kfree(a);
+}
+
 static int free_lpi_range(u32 base, u32 nr_lpis)
 {
-	struct lpi_range *new;
-	int err = 0;
+	struct lpi_range *new, *old;
+
+	new = mk_lpi_range(base, nr_lpis);
+	if (!new)
+		return -ENOMEM;
 
 	mutex_lock(&lpi_range_lock);
 
-	new = mk_lpi_range(base, nr_lpis);
-	if (!new) {
-		err = -ENOMEM;
-		goto out;
+	list_for_each_entry_reverse(old, &lpi_range_list, entry) {
+		if (old->base_id < base)
+			break;
 	}
+	/*
+	 * old is the last element with ->base_id smaller than base,
+	 * so new goes right after it. If there are no elements with
+	 * ->base_id smaller than base, &old->entry ends up pointing
+	 * at the head of the list, and inserting new it the start of
+	 * the list is the right thing to do in that case as well.
+	 */
+	list_add(&new->entry, &old->entry);
+	/*
+	 * Now check if we can merge with the preceding and/or
+	 * following ranges.
+	 */
+	merge_lpi_ranges(old, new);
+	merge_lpi_ranges(new, list_next_entry(new, entry));
 
-	list_add(&new->entry, &lpi_range_list);
-	list_sort(NULL, &lpi_range_list, lpi_range_cmp);
-	merge_lpi_ranges();
-out:
 	mutex_unlock(&lpi_range_lock);
-	return err;
+	return 0;
 }
 
 static int __init its_lpi_init(u32 id_bits)
@@ -1746,6 +1743,7 @@ static int its_setup_baser(struct its_node *its, struct its_baser *baser,
 	u64 type = GITS_BASER_TYPE(val);
 	u64 baser_phys, tmp;
 	u32 alloc_pages;
+	struct page *page;
 	void *base;
 
 retry_alloc_baser:
@@ -1758,10 +1756,11 @@ retry_alloc_baser:
 		order = get_order(GITS_BASER_PAGES_MAX * psz);
 	}
 
-	base = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, order);
-	if (!base)
+	page = alloc_pages_node(its->numa_node, GFP_KERNEL | __GFP_ZERO, order);
+	if (!page)
 		return -ENOMEM;
 
+	base = (void *)page_address(page);
 	baser_phys = virt_to_phys(base);
 
 	/* Check if the physical address of the memory is above 48bits */
@@ -1955,6 +1954,8 @@ static int its_alloc_tables(struct its_node *its)
 			indirect = its_parse_indirect_baser(its, baser,
 							    psz, &order,
 							    its->device_ids);
+			break;
+
 		case GITS_BASER_TYPE_VCPU:
 			indirect = its_parse_indirect_baser(its, baser,
 							    psz, &order,
@@ -2292,7 +2293,8 @@ static struct its_baser *its_get_baser(struct its_node *its, u32 type)
 	return NULL;
 }
 
-static bool its_alloc_table_entry(struct its_baser *baser, u32 id)
+static bool its_alloc_table_entry(struct its_node *its,
+				  struct its_baser *baser, u32 id)
 {
 	struct page *page;
 	u32 esz, idx;
@@ -2312,7 +2314,8 @@ static bool its_alloc_table_entry(struct its_baser *baser, u32 id)
 
 	/* Allocate memory for 2nd level table */
 	if (!table[idx]) {
-		page = alloc_pages(GFP_KERNEL | __GFP_ZERO, get_order(baser->psz));
+		page = alloc_pages_node(its->numa_node, GFP_KERNEL | __GFP_ZERO,
+					get_order(baser->psz));
 		if (!page)
 			return false;
 
@@ -2343,7 +2346,7 @@ static bool its_alloc_device_table(struct its_node *its, u32 dev_id)
 	if (!baser)
 		return (ilog2(dev_id) < its->device_ids);
 
-	return its_alloc_table_entry(baser, dev_id);
+	return its_alloc_table_entry(its, baser, dev_id);
 }
 
 static bool its_alloc_vpe_table(u32 vpe_id)
@@ -2367,7 +2370,7 @@ static bool its_alloc_vpe_table(u32 vpe_id)
 		if (!baser)
 			return false;
 
-		if (!its_alloc_table_entry(baser, vpe_id))
+		if (!its_alloc_table_entry(its, baser, vpe_id))
 			return false;
 	}
 
@@ -2401,7 +2404,7 @@ static struct its_device *its_create_device(struct its_node *its, u32 dev_id,
 	nr_ites = max(2, nvecs);
 	sz = nr_ites * its->ite_size;
 	sz = max(sz, ITS_ITT_ALIGN) + ITS_ITT_ALIGN - 1;
-	itt = kzalloc(sz, GFP_KERNEL);
+	itt = kzalloc_node(sz, GFP_KERNEL, its->numa_node);
 	if (alloc_lpis) {
 		lpi_map = its_lpi_alloc(nvecs, &lpi_base, &nr_lpis);
 		if (lpi_map)
@@ -2481,7 +2484,7 @@ static int its_msi_prepare(struct irq_domain *domain, struct device *dev,
 	int err = 0;
 
 	/*
-	 * We ignore "dev" entierely, and rely on the dev_id that has
+	 * We ignore "dev" entirely, and rely on the dev_id that has
 	 * been passed via the scratchpad. This limits this domain's
 	 * usefulness to upper layers that definitely know that they
 	 * are built on top of the ITS.
@@ -2560,11 +2563,16 @@ static int its_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 {
 	msi_alloc_info_t *info = args;
 	struct its_device *its_dev = info->scratchpad[0].ptr;
+	struct its_node *its = its_dev->its;
 	irq_hw_number_t hwirq;
 	int err;
 	int i;
 
 	err = its_alloc_device_irq(its_dev, nr_irqs, &hwirq);
+	if (err)
+		return err;
+
+	err = iommu_dma_prepare_msi(info->desc, its->get_msi_base(its_dev));
 	if (err)
 		return err;
 
@@ -3543,6 +3551,7 @@ static int __init its_probe_one(struct resource *res,
 	void __iomem *its_base;
 	u32 val, ctlr;
 	u64 baser, tmp, typer;
+	struct page *page;
 	int err;
 
 	its_base = ioremap(res->start, resource_size(res));
@@ -3599,12 +3608,13 @@ static int __init its_probe_one(struct resource *res,
 
 	its->numa_node = numa_node;
 
-	its->cmd_base = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
-						get_order(ITS_CMD_QUEUE_SZ));
-	if (!its->cmd_base) {
+	page = alloc_pages_node(its->numa_node, GFP_KERNEL | __GFP_ZERO,
+				get_order(ITS_CMD_QUEUE_SZ));
+	if (!page) {
 		err = -ENOMEM;
 		goto out_free_its;
 	}
+	its->cmd_base = (void *)page_address(page);
 	its->cmd_write = its->cmd_base;
 	its->fwnode_handle = handle;
 	its->get_msi_base = its_irq_get_msi_base;
@@ -3822,13 +3832,13 @@ static int __init acpi_get_its_numa_node(u32 its_id)
 	return NUMA_NO_NODE;
 }
 
-static int __init gic_acpi_match_srat_its(struct acpi_subtable_header *header,
+static int __init gic_acpi_match_srat_its(union acpi_subtable_headers *header,
 					  const unsigned long end)
 {
 	return 0;
 }
 
-static int __init gic_acpi_parse_srat_its(struct acpi_subtable_header *header,
+static int __init gic_acpi_parse_srat_its(union acpi_subtable_headers *header,
 			 const unsigned long end)
 {
 	int node;
@@ -3895,7 +3905,7 @@ static int __init acpi_get_its_numa_node(u32 its_id) { return NUMA_NO_NODE; }
 static void __init acpi_its_srat_maps_free(void) { }
 #endif
 
-static int __init gic_acpi_parse_madt_its(struct acpi_subtable_header *header,
+static int __init gic_acpi_parse_madt_its(union acpi_subtable_headers *header,
 					  const unsigned long end)
 {
 	struct acpi_madt_generic_translator *its_entry;

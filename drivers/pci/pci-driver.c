@@ -100,7 +100,7 @@ static ssize_t new_id_store(struct device_driver *driver, const char *buf,
 {
 	struct pci_driver *pdrv = to_pci_driver(driver);
 	const struct pci_device_id *ids = pdrv->id_table;
-	__u32 vendor, device, subvendor = PCI_ANY_ID,
+	u32 vendor, device, subvendor = PCI_ANY_ID,
 		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;
 	unsigned long driver_data = 0;
 	int fields = 0;
@@ -168,7 +168,7 @@ static ssize_t remove_id_store(struct device_driver *driver, const char *buf,
 {
 	struct pci_dynid *dynid, *n;
 	struct pci_driver *pdrv = to_pci_driver(driver);
-	__u32 vendor, device, subvendor = PCI_ANY_ID,
+	u32 vendor, device, subvendor = PCI_ANY_ID,
 		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;
 	int fields = 0;
 	size_t retval = -ENODEV;
@@ -578,7 +578,7 @@ static int pci_legacy_suspend(struct device *dev, pm_message_t state)
 		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
 		    && pci_dev->current_state != PCI_UNKNOWN) {
 			WARN_ONCE(pci_dev->current_state != prev,
-				"PCI PM: Device state not saved by %pF\n",
+				"PCI PM: Device state not saved by %pS\n",
 				drv->suspend);
 		}
 	}
@@ -605,7 +605,7 @@ static int pci_legacy_suspend_late(struct device *dev, pm_message_t state)
 		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
 		    && pci_dev->current_state != PCI_UNKNOWN) {
 			WARN_ONCE(pci_dev->current_state != prev,
-				"PCI PM: Device state not saved by %pF\n",
+				"PCI PM: Device state not saved by %pS\n",
 				drv->suspend_late);
 			goto Fixup;
 		}
@@ -773,7 +773,7 @@ static int pci_pm_suspend(struct device *dev)
 		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
 		    && pci_dev->current_state != PCI_UNKNOWN) {
 			WARN_ONCE(pci_dev->current_state != prev,
-				"PCI PM: State of device not saved by %pF\n",
+				"PCI PM: State of device not saved by %pS\n",
 				pm->suspend);
 		}
 	}
@@ -821,7 +821,7 @@ static int pci_pm_suspend_noirq(struct device *dev)
 		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
 		    && pci_dev->current_state != PCI_UNKNOWN) {
 			WARN_ONCE(pci_dev->current_state != prev,
-				"PCI PM: State of device not saved by %pF\n",
+				"PCI PM: State of device not saved by %pS\n",
 				pm->suspend_noirq);
 			goto Fixup;
 		}
@@ -1260,11 +1260,11 @@ static int pci_pm_runtime_suspend(struct device *dev)
 		 * log level.
 		 */
 		if (error == -EBUSY || error == -EAGAIN) {
-			dev_dbg(dev, "can't suspend now (%pf returned %d)\n",
+			dev_dbg(dev, "can't suspend now (%ps returned %d)\n",
 				pm->runtime_suspend, error);
 			return error;
 		} else if (error) {
-			dev_err(dev, "can't suspend (%pf returned %d)\n",
+			dev_err(dev, "can't suspend (%ps returned %d)\n",
 				pm->runtime_suspend, error);
 			return error;
 		}
@@ -1276,7 +1276,7 @@ static int pci_pm_runtime_suspend(struct device *dev)
 	    && !pci_dev->state_saved && pci_dev->current_state != PCI_D0
 	    && pci_dev->current_state != PCI_UNKNOWN) {
 		WARN_ONCE(pci_dev->current_state != prev,
-			"PCI PM: State of device not saved by %pF\n",
+			"PCI PM: State of device not saved by %pS\n",
 			pm->runtime_suspend);
 		return 0;
 	}

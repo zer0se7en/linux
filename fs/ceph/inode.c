@@ -497,7 +497,7 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 	ci->i_wrbuffer_ref = 0;
 	ci->i_wrbuffer_ref_head = 0;
 	atomic_set(&ci->i_filelock_ref, 0);
-	atomic_set(&ci->i_shared_gen, 0);
+	atomic_set(&ci->i_shared_gen, 1);
 	ci->i_rdcache_gen = 0;
 	ci->i_rdcache_revoking = 0;
 
@@ -519,11 +519,11 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 	return &ci->vfs_inode;
 }
 
-static void ceph_i_callback(struct rcu_head *head)
+void ceph_free_inode(struct inode *inode)
 {
-	struct inode *inode = container_of(head, struct inode, i_rcu);
 	struct ceph_inode_info *ci = ceph_inode(inode);
 
+	kfree(ci->i_symlink);
 	kmem_cache_free(ceph_inode_cachep, ci);
 }
 
@@ -537,7 +537,7 @@ void ceph_destroy_inode(struct inode *inode)
 
 	ceph_fscache_unregister_inode_cookie(ci);
 
-	ceph_queue_caps_release(inode);
+	__ceph_remove_caps(inode);
 
 	if (__ceph_has_any_quota(ci))
 		ceph_adjust_quota_realms_count(inode, false);
@@ -548,20 +548,24 @@ void ceph_destroy_inode(struct inode *inode)
 	 */
 	if (ci->i_snap_realm) {
 		struct ceph_mds_client *mdsc =
-			ceph_sb_to_client(ci->vfs_inode.i_sb)->mdsc;
-		struct ceph_snap_realm *realm = ci->i_snap_realm;
-
-		dout(" dropping residual ref to snap realm %p\n", realm);
-		spin_lock(&realm->inodes_with_caps_lock);
-		list_del_init(&ci->i_snap_realm_item);
-		ci->i_snap_realm = NULL;
-		if (realm->ino == ci->i_vino.ino)
-			realm->inode = NULL;
-		spin_unlock(&realm->inodes_with_caps_lock);
-		ceph_put_snap_realm(mdsc, realm);
+					ceph_inode_to_client(inode)->mdsc;
+		if (ceph_snap(inode) == CEPH_NOSNAP) {
+			struct ceph_snap_realm *realm = ci->i_snap_realm;
+			dout(" dropping residual ref to snap realm %p\n",
+			     realm);
+			spin_lock(&realm->inodes_with_caps_lock);
+			list_del_init(&ci->i_snap_realm_item);
+			ci->i_snap_realm = NULL;
+			if (realm->ino == ci->i_vino.ino)
+				realm->inode = NULL;
+			spin_unlock(&realm->inodes_with_caps_lock);
+			ceph_put_snap_realm(mdsc, realm);
+		} else {
+			ceph_put_snapid_map(mdsc, ci->i_snapid_map);
+			ci->i_snap_realm = NULL;
+		}
 	}
 
-	kfree(ci->i_symlink);
 	while ((n = rb_first(&ci->i_fragtree)) != NULL) {
 		frag = rb_entry(n, struct ceph_inode_frag, node);
 		rb_erase(n, &ci->i_fragtree);
@@ -576,8 +580,6 @@ void ceph_destroy_inode(struct inode *inode)
 		ceph_buffer_put(ci->i_xattrs.prealloc_blob);
 
 	ceph_put_string(rcu_dereference_raw(ci->i_layout.pool_ns));
-
-	call_rcu(&inode->i_rcu, ceph_i_callback);
 }
 
 int ceph_drop_inode(struct inode *inode)
@@ -776,6 +778,9 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 		pool_ns = ceph_find_or_create_string(iinfo->pool_ns_data,
 						     iinfo->pool_ns_len);
 
+	if (ceph_snap(inode) != CEPH_NOSNAP && !ci->i_snapid_map)
+		ci->i_snapid_map = ceph_get_snapid_map(mdsc, ceph_snap(inode));
+
 	spin_lock(&ci->i_ceph_lock);
 
 	/*
@@ -869,6 +874,7 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 			ci->i_rbytes = le64_to_cpu(info->rbytes);
 			ci->i_rfiles = le64_to_cpu(info->rfiles);
 			ci->i_rsubdirs = le64_to_cpu(info->rsubdirs);
+			ci->i_dir_pin = iinfo->dir_pin;
 			ceph_decode_timespec64(&ci->i_rctime, &info->rctime);
 		}
 	}
@@ -899,6 +905,7 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 	case S_IFBLK:
 	case S_IFCHR:
 	case S_IFSOCK:
+		inode->i_blkbits = PAGE_SHIFT;
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 		inode->i_op = &ceph_file_iops;
 		break;
@@ -1066,9 +1073,10 @@ static void update_dentry_lease(struct dentry *dentry,
 		goto out_unlock;
 
 	di->lease_shared_gen = atomic_read(&ceph_inode(dir)->i_shared_gen);
-
-	if (duration == 0)
+	if (duration == 0) {
+		__ceph_dentry_dir_lease_touch(di);
 		goto out_unlock;
+	}
 
 	if (di->lease_gen == session->s_cap_gen &&
 	    time_before(ttl, di->time))
@@ -1079,8 +1087,6 @@ static void update_dentry_lease(struct dentry *dentry,
 		di->lease_session = NULL;
 	}
 
-	ceph_dentry_lru_touch(dentry);
-
 	if (!di->lease_session)
 		di->lease_session = ceph_get_mds_session(session);
 	di->lease_gen = session->s_cap_gen;
@@ -1088,6 +1094,8 @@ static void update_dentry_lease(struct dentry *dentry,
 	di->lease_renew_after = half_ttl;
 	di->lease_renew_from = 0;
 	di->time = ttl;
+
+	__ceph_dentry_lease_touch(di);
 out_unlock:
 	spin_unlock(&dentry->d_lock);
 	if (old_lease_session)
@@ -1150,6 +1158,19 @@ static int splice_dentry(struct dentry **pdn, struct inode *in)
 		     dn, d_inode(dn), ceph_vinop(d_inode(dn)));
 	}
 	return 0;
+}
+
+static int d_name_cmp(struct dentry *dentry, const char *name, size_t len)
+{
+	int ret;
+
+	/* take d_lock to ensure dentry->d_name stability */
+	spin_lock(&dentry->d_lock);
+	ret = dentry->d_name.len - len;
+	if (!ret)
+		ret = memcmp(dentry->d_name.name, name, len);
+	spin_unlock(&dentry->d_lock);
+	return ret;
 }
 
 /*
@@ -1401,7 +1422,8 @@ retry_lookup:
 		err = splice_dentry(&req->r_dentry, in);
 		if (err < 0)
 			goto done;
-	} else if (rinfo->head->is_dentry) {
+	} else if (rinfo->head->is_dentry &&
+		   !d_name_cmp(req->r_dentry, rinfo->dname, rinfo->dname_len)) {
 		struct ceph_vino *ptvino = NULL;
 
 		if ((le32_to_cpu(rinfo->diri.in->cap.caps) & CEPH_CAP_FILE_SHARED) ||
@@ -2244,42 +2266,72 @@ int ceph_permission(struct inode *inode, int mask)
 	return err;
 }
 
+/* Craft a mask of needed caps given a set of requested statx attrs. */
+static int statx_to_caps(u32 want)
+{
+	int mask = 0;
+
+	if (want & (STATX_MODE|STATX_UID|STATX_GID|STATX_CTIME))
+		mask |= CEPH_CAP_AUTH_SHARED;
+
+	if (want & (STATX_NLINK|STATX_CTIME))
+		mask |= CEPH_CAP_LINK_SHARED;
+
+	if (want & (STATX_ATIME|STATX_MTIME|STATX_CTIME|STATX_SIZE|
+		    STATX_BLOCKS))
+		mask |= CEPH_CAP_FILE_SHARED;
+
+	if (want & (STATX_CTIME))
+		mask |= CEPH_CAP_XATTR_SHARED;
+
+	return mask;
+}
+
 /*
- * Get all attributes.  Hopefully somedata we'll have a statlite()
- * and can limit the fields we require to be accurate.
+ * Get all the attributes. If we have sufficient caps for the requested attrs,
+ * then we can avoid talking to the MDS at all.
  */
 int ceph_getattr(const struct path *path, struct kstat *stat,
 		 u32 request_mask, unsigned int flags)
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct ceph_inode_info *ci = ceph_inode(inode);
-	int err;
+	int err = 0;
 
-	err = ceph_do_getattr(inode, CEPH_STAT_CAP_INODE_ALL, false);
-	if (!err) {
-		generic_fillattr(inode, stat);
-		stat->ino = ceph_translate_ino(inode->i_sb, inode->i_ino);
-		if (ceph_snap(inode) != CEPH_NOSNAP)
-			stat->dev = ceph_snap(inode);
-		else
-			stat->dev = 0;
-		if (S_ISDIR(inode->i_mode)) {
-			if (ceph_test_mount_opt(ceph_sb_to_client(inode->i_sb),
-						RBYTES))
-				stat->size = ci->i_rbytes;
-			else
-				stat->size = ci->i_files + ci->i_subdirs;
-			stat->blocks = 0;
-			stat->blksize = 65536;
-			/*
-			 * Some applications rely on the number of st_nlink
-			 * value on directories to be either 0 (if unlinked)
-			 * or 2 + number of subdirectories.
-			 */
-			if (stat->nlink == 1)
-				/* '.' + '..' + subdirs */
-				stat->nlink = 1 + 1 + ci->i_subdirs;
-		}
+	/* Skip the getattr altogether if we're asked not to sync */
+	if (!(flags & AT_STATX_DONT_SYNC)) {
+		err = ceph_do_getattr(inode, statx_to_caps(request_mask),
+				      flags & AT_STATX_FORCE_SYNC);
+		if (err)
+			return err;
 	}
+
+	generic_fillattr(inode, stat);
+	stat->ino = ceph_translate_ino(inode->i_sb, inode->i_ino);
+	if (ceph_snap(inode) == CEPH_NOSNAP)
+		stat->dev = inode->i_sb->s_dev;
+	else
+		stat->dev = ci->i_snapid_map ? ci->i_snapid_map->dev : 0;
+
+	if (S_ISDIR(inode->i_mode)) {
+		if (ceph_test_mount_opt(ceph_sb_to_client(inode->i_sb),
+					RBYTES))
+			stat->size = ci->i_rbytes;
+		else
+			stat->size = ci->i_files + ci->i_subdirs;
+		stat->blocks = 0;
+		stat->blksize = 65536;
+		/*
+		 * Some applications rely on the number of st_nlink
+		 * value on directories to be either 0 (if unlinked)
+		 * or 2 + number of subdirectories.
+		 */
+		if (stat->nlink == 1)
+			/* '.' + '..' + subdirs */
+			stat->nlink = 1 + 1 + ci->i_subdirs;
+	}
+
+	/* Mask off any higher bits (e.g. btime) until we have support */
+	stat->result_mask = request_mask & STATX_BASIC_STATS;
 	return err;
 }

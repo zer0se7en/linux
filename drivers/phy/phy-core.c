@@ -384,9 +384,15 @@ int phy_reset(struct phy *phy)
 	if (!phy || !phy->ops->reset)
 		return 0;
 
+	ret = phy_pm_runtime_get_sync(phy);
+	if (ret < 0 && ret != -ENOTSUPP)
+		return ret;
+
 	mutex_lock(&phy->mutex);
 	ret = phy->ops->reset(phy);
 	mutex_unlock(&phy->mutex);
+
+	phy_pm_runtime_put(phy);
 
 	return ret;
 }
@@ -563,6 +569,11 @@ void phy_put(struct phy *phy)
 {
 	if (!phy || IS_ERR(phy))
 		return;
+
+	mutex_lock(&phy->mutex);
+	if (phy->ops->release)
+		phy->ops->release(phy);
+	mutex_unlock(&phy->mutex);
 
 	module_put(phy->ops->owner);
 	put_device(&phy->dev);
@@ -1112,14 +1123,4 @@ static int __init phy_core_init(void)
 
 	return 0;
 }
-module_init(phy_core_init);
-
-static void __exit phy_core_exit(void)
-{
-	class_destroy(phy_class);
-}
-module_exit(phy_core_exit);
-
-MODULE_DESCRIPTION("Generic PHY Framework");
-MODULE_AUTHOR("Kishon Vijay Abraham I <kishon@ti.com>");
-MODULE_LICENSE("GPL v2");
+device_initcall(phy_core_init);
