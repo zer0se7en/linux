@@ -364,6 +364,8 @@ struct nvme_ns_head {
 	spinlock_t		requeue_lock;
 	struct work_struct	requeue_work;
 	struct mutex		lock;
+	unsigned long		flags;
+#define NVME_NSHEAD_DISK_LIVE	0
 	struct nvme_ns __rcu	*current_path[];
 #endif
 };
@@ -599,8 +601,7 @@ static inline void nvme_trace_bio_complete(struct request *req,
 	struct nvme_ns *ns = req->q->queuedata;
 
 	if (req->cmd_flags & REQ_NVME_MPATH)
-		trace_block_bio_complete(ns->head->disk->queue,
-					 req->bio, status);
+		trace_block_bio_complete(ns->head->disk->queue, req->bio);
 }
 
 extern struct device_attribute dev_attr_ana_grpid;

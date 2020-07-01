@@ -1593,7 +1593,7 @@ static int nvme_alloc_admin_tags(struct nvme_dev *dev)
 
 		dev->admin_tagset.queue_depth = NVME_AQ_MQ_TAG_DEPTH;
 		dev->admin_tagset.timeout = ADMIN_TIMEOUT;
-		dev->admin_tagset.numa_node = dev_to_node(dev->dev);
+		dev->admin_tagset.numa_node = dev->ctrl.numa_node;
 		dev->admin_tagset.cmd_size = sizeof(struct nvme_iod);
 		dev->admin_tagset.flags = BLK_MQ_F_NO_SCHED;
 		dev->admin_tagset.driver_data = dev;
@@ -1668,6 +1668,8 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 	result = nvme_alloc_queue(dev, 0, NVME_AQ_DEPTH);
 	if (result)
 		return result;
+
+	dev->ctrl.numa_node = dev_to_node(dev->dev);
 
 	nvmeq = &dev->queues[0];
 	aqa = nvmeq->q_depth - 1;
@@ -2257,7 +2259,7 @@ static void nvme_dev_add(struct nvme_dev *dev)
 		if (dev->io_queues[HCTX_TYPE_POLL])
 			dev->tagset.nr_maps++;
 		dev->tagset.timeout = NVME_IO_TIMEOUT;
-		dev->tagset.numa_node = dev_to_node(dev->dev);
+		dev->tagset.numa_node = dev->ctrl.numa_node;
 		dev->tagset.queue_depth =
 				min_t(int, dev->q_depth, BLK_MQ_MAX_DEPTH) - 1;
 		dev->tagset.cmd_size = sizeof(struct nvme_iod);
@@ -2950,9 +2952,15 @@ static int nvme_suspend(struct device *dev)
 	 * the PCI bus layer to put it into D3 in order to take the PCIe link
 	 * down, so as to allow the platform to achieve its minimum low-power
 	 * state (which may not be possible if the link is up).
+	 *
+	 * If a host memory buffer is enabled, shut down the device as the NVMe
+	 * specification allows the device to access the host memory buffer in
+	 * host DRAM from all power states, but hosts will fail access to DRAM
+	 * during S3.
 	 */
 	if (pm_suspend_via_firmware() || !ctrl->npss ||
 	    !pcie_aspm_enabled(pdev) ||
+	    ndev->nr_host_mem_descs ||
 	    (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
 		return nvme_disable_prepare_reset(ndev, true);
 

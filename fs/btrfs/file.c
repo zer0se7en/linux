@@ -1533,7 +1533,7 @@ lock_and_cleanup_extent_if_need(struct btrfs_inode *inode, struct page **pages,
 }
 
 static noinline int check_can_nocow(struct btrfs_inode *inode, loff_t pos,
-				    size_t *write_bytes)
+				    size_t *write_bytes, bool nowait)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct btrfs_root *root = inode->root;
@@ -1541,27 +1541,43 @@ static noinline int check_can_nocow(struct btrfs_inode *inode, loff_t pos,
 	u64 num_bytes;
 	int ret;
 
-	if (!btrfs_drew_try_write_lock(&root->snapshot_lock))
+	if (!nowait && !btrfs_drew_try_write_lock(&root->snapshot_lock))
 		return -EAGAIN;
 
 	lockstart = round_down(pos, fs_info->sectorsize);
 	lockend = round_up(pos + *write_bytes,
 			   fs_info->sectorsize) - 1;
-
-	btrfs_lock_and_flush_ordered_range(inode, lockstart,
-					   lockend, NULL);
-
 	num_bytes = lockend - lockstart + 1;
+
+	if (nowait) {
+		struct btrfs_ordered_extent *ordered;
+
+		if (!try_lock_extent(&inode->io_tree, lockstart, lockend))
+			return -EAGAIN;
+
+		ordered = btrfs_lookup_ordered_range(inode, lockstart,
+						     num_bytes);
+		if (ordered) {
+			btrfs_put_ordered_extent(ordered);
+			ret = -EAGAIN;
+			goto out_unlock;
+		}
+	} else {
+		btrfs_lock_and_flush_ordered_range(inode, lockstart,
+						   lockend, NULL);
+	}
+
 	ret = can_nocow_extent(&inode->vfs_inode, lockstart, &num_bytes,
 			NULL, NULL, NULL);
 	if (ret <= 0) {
 		ret = 0;
-		btrfs_drew_write_unlock(&root->snapshot_lock);
+		if (!nowait)
+			btrfs_drew_write_unlock(&root->snapshot_lock);
 	} else {
 		*write_bytes = min_t(size_t, *write_bytes ,
 				     num_bytes - pos + lockstart);
 	}
-
+out_unlock:
 	unlock_extent(&inode->io_tree, lockstart, lockend);
 
 	return ret;
@@ -1633,7 +1649,7 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 			if ((BTRFS_I(inode)->flags & (BTRFS_INODE_NODATACOW |
 						      BTRFS_INODE_PREALLOC)) &&
 			    check_can_nocow(BTRFS_I(inode), pos,
-					&write_bytes) > 0) {
+					    &write_bytes, false) > 0) {
 				/*
 				 * For nodata cow case, no need to reserve
 				 * data space.
@@ -1809,61 +1825,21 @@ again:
 	return num_written ? num_written : ret;
 }
 
-static ssize_t check_direct_IO(struct btrfs_fs_info *fs_info,
-                               const struct iov_iter *iter, loff_t offset)
-{
-        const unsigned int blocksize_mask = fs_info->sectorsize - 1;
-
-        if (offset & blocksize_mask)
-                return -EINVAL;
-
-        if (iov_iter_alignment(iter) & blocksize_mask)
-                return -EINVAL;
-
-	return 0;
-}
-
-static ssize_t btrfs_direct_write(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t __btrfs_direct_write(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
-	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
-	loff_t pos = iocb->ki_pos;
-	ssize_t written = 0;
+	loff_t pos;
+	ssize_t written;
 	ssize_t written_buffered;
 	loff_t endbyte;
 	int err;
-	size_t count = 0;
-	bool relock = false;
 
-	if (check_direct_IO(fs_info, from, pos))
-		goto buffered;
-
-	count = iov_iter_count(from);
-	/*
-	 * If the write DIO is beyond the EOF, we need update the isize, but it
-	 * is protected by i_mutex. So we can not unlock the i_mutex at this
-	 * case.
-	 */
-	if (pos + count <= inode->i_size) {
-		inode_unlock(inode);
-		relock = true;
-	} else if (iocb->ki_flags & IOCB_NOWAIT) {
-		return -EAGAIN;
-	}
-
-	down_read(&BTRFS_I(inode)->dio_sem);
-	written = iomap_dio_rw(iocb, from, &btrfs_dio_iomap_ops, &btrfs_dops,
-			       is_sync_kiocb(iocb));
-	up_read(&BTRFS_I(inode)->dio_sem);
-
-	if (relock)
-		inode_lock(inode);
+	written = generic_file_direct_write(iocb, from);
 
 	if (written < 0 || !iov_iter_count(from))
 		return written;
 
-buffered:
 	pos = iocb->ki_pos;
 	written_buffered = btrfs_buffered_write(iocb, from);
 	if (written_buffered < 0) {
@@ -1944,13 +1920,25 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	pos = iocb->ki_pos;
 	count = iov_iter_count(from);
 	if (iocb->ki_flags & IOCB_NOWAIT) {
+		size_t nocow_bytes = count;
+
 		/*
 		 * We will allocate space in case nodatacow is not set,
 		 * so bail
 		 */
 		if (!(BTRFS_I(inode)->flags & (BTRFS_INODE_NODATACOW |
 					      BTRFS_INODE_PREALLOC)) ||
-		    check_can_nocow(BTRFS_I(inode), pos, &count) <= 0) {
+		    check_can_nocow(BTRFS_I(inode), pos, &nocow_bytes,
+				    true) <= 0) {
+			inode_unlock(inode);
+			return -EAGAIN;
+		}
+		/*
+		 * There are holes in the range or parts of the range that must
+		 * be COWed (shared extents, RO block groups, etc), so just bail
+		 * out.
+		 */
+		if (nocow_bytes < count) {
 			inode_unlock(inode);
 			return -EAGAIN;
 		}
@@ -2002,7 +1990,7 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 		atomic_inc(&BTRFS_I(inode)->sync_writers);
 
 	if (iocb->ki_flags & IOCB_DIRECT) {
-		num_written = btrfs_direct_write(iocb, from);
+		num_written = __btrfs_direct_write(iocb, from);
 	} else {
 		num_written = btrfs_buffered_write(iocb, from);
 		if (num_written > 0)
@@ -3516,54 +3504,9 @@ static int btrfs_file_open(struct inode *inode, struct file *filp)
 	return generic_file_open(inode, filp);
 }
 
-static int check_direct_read(struct btrfs_fs_info *fs_info,
-                               const struct iov_iter *iter, loff_t offset)
-{
-	int ret;
-	int i, seg;
-
-	ret = check_direct_IO(fs_info, iter, offset);
-	if (ret < 0)
-		return ret;
-
-	for (seg = 0; seg < iter->nr_segs; seg++)
-		for (i = seg + 1; i < iter->nr_segs; i++)
-			if (iter->iov[seg].iov_base == iter->iov[i].iov_base)
-				return -EINVAL;
-	return 0;
-}
-
-static ssize_t btrfs_direct_read(struct kiocb *iocb, struct iov_iter *to)
-{
-	struct inode *inode = file_inode(iocb->ki_filp);
-	ssize_t ret;
-
-	if (check_direct_read(btrfs_sb(inode->i_sb), to, iocb->ki_pos))
-		return 0;
-
-	inode_lock_shared(inode);
-        ret = iomap_dio_rw(iocb, to, &btrfs_dio_iomap_ops, &btrfs_dops,
-			   is_sync_kiocb(iocb));
-	inode_unlock_shared(inode);
-	return ret;
-}
-
-static ssize_t btrfs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
-{
-	ssize_t ret = 0;
-
-	if (iocb->ki_flags & IOCB_DIRECT) {
-		ret = btrfs_direct_read(iocb, to);
-		if (ret < 0)
-			return ret;
-	}
-
-	return generic_file_buffered_read(iocb, to, ret);
-}
-
 const struct file_operations btrfs_file_operations = {
 	.llseek		= btrfs_file_llseek,
-	.read_iter      = btrfs_file_read_iter,
+	.read_iter      = generic_file_read_iter,
 	.splice_read	= generic_file_splice_read,
 	.write_iter	= btrfs_file_write_iter,
 	.mmap		= btrfs_file_mmap,
