@@ -914,13 +914,6 @@ static void do_signal(struct pt_regs *regs)
 asmlinkage void do_notify_resume(struct pt_regs *regs,
 				 unsigned long thread_flags)
 {
-	/*
-	 * The assembly code enters us with IRQs off, but it hasn't
-	 * informed the tracing code of that for efficiency reasons.
-	 * Update the trace code with the current status.
-	 */
-	trace_hardirqs_off();
-
 	do {
 		if (thread_flags & _TIF_NEED_RESCHED) {
 			/* Unmask Debug and SError for the next task */
@@ -939,7 +932,7 @@ asmlinkage void do_notify_resume(struct pt_regs *regs,
 					       (void __user *)NULL, current);
 			}
 
-			if (thread_flags & _TIF_SIGPENDING)
+			if (thread_flags & (_TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL))
 				do_signal(regs);
 
 			if (thread_flags & _TIF_NOTIFY_RESUME) {
