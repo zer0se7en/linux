@@ -131,8 +131,8 @@ static int test__pfm_group(void)
 		},
 		{
 			.events = "{},{instructions}",
-			.nr_events = 0,
-			.nr_groups = 0,
+			.nr_events = 1,
+			.nr_groups = 1,
 		},
 		{
 			.events = "{instructions},{instructions}",
@@ -154,6 +154,16 @@ static int test__pfm_group(void)
 			"{instructions,cycles},{instructions,stereolab}",
 			.nr_events = 3,
 			.nr_groups = 1,
+		},
+		{
+			.events = "instructions}",
+			.nr_events = 1,
+			.nr_groups = 0,
+		},
+		{
+			.events = "{{instructions}}",
+			.nr_events = 0,
+			.nr_groups = 0,
 		},
 	};
 
