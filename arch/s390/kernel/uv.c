@@ -51,23 +51,8 @@ void __init setup_uv(void)
 {
 	unsigned long uv_stor_base;
 
-	/*
-	 * keep these conditions in line with has_uv_sec_stor_limit()
-	 */
 	if (!is_prot_virt_host())
 		return;
-
-	if (is_prot_virt_guest()) {
-		prot_virt_host = 0;
-		pr_warn("Protected virtualization not available in protected guests.");
-		return;
-	}
-
-	if (!test_facility(158)) {
-		prot_virt_host = 0;
-		pr_warn("Protected virtualization not supported by the hardware.");
-		return;
-	}
 
 	uv_stor_base = (unsigned long)memblock_alloc_try_nid(
 		uv_info.uv_base_stor_len, SZ_1M, SZ_2G,
@@ -358,6 +343,15 @@ static ssize_t uv_query_facilities(struct kobject *kobj,
 static struct kobj_attribute uv_query_facilities_attr =
 	__ATTR(facilities, 0444, uv_query_facilities, NULL);
 
+static ssize_t uv_query_feature_indications(struct kobject *kobj,
+					    struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lx\n", uv_info.uv_feature_indications);
+}
+
+static struct kobj_attribute uv_query_feature_indications_attr =
+	__ATTR(feature_indications, 0444, uv_query_feature_indications, NULL);
+
 static ssize_t uv_query_max_guest_cpus(struct kobject *kobj,
 				       struct kobj_attribute *attr, char *page)
 {
@@ -390,6 +384,7 @@ static struct kobj_attribute uv_query_max_guest_addr_attr =
 
 static struct attribute *uv_query_attrs[] = {
 	&uv_query_facilities_attr.attr,
+	&uv_query_feature_indications_attr.attr,
 	&uv_query_max_guest_cpus_attr.attr,
 	&uv_query_max_guest_vms_attr.attr,
 	&uv_query_max_guest_addr_attr.attr,
