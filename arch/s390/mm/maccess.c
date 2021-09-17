@@ -125,12 +125,18 @@ static unsigned long __no_sanitize_address _memcpy_real(unsigned long dest,
  */
 int memcpy_real(void *dest, void *src, size_t count)
 {
+	unsigned long _dest  = (unsigned long)dest;
+	unsigned long _src   = (unsigned long)src;
+	unsigned long _count = (unsigned long)count;
 	int rc;
 
 	if (S390_lowcore.nodat_stack != 0) {
 		preempt_disable();
-		rc = CALL_ON_STACK(_memcpy_real, S390_lowcore.nodat_stack, 3,
-				   dest, src, count);
+		rc = call_on_stack(3, S390_lowcore.nodat_stack,
+				   unsigned long, _memcpy_real,
+				   unsigned long, _dest,
+				   unsigned long, _src,
+				   unsigned long, _count);
 		preempt_enable();
 		return rc;
 	}
@@ -139,8 +145,7 @@ int memcpy_real(void *dest, void *src, size_t count)
 	 * not set up yet. Just call _memcpy_real on the early boot
 	 * stack
 	 */
-	return _memcpy_real((unsigned long) dest,(unsigned long) src,
-			    (unsigned long) count);
+	return _memcpy_real(_dest, _src, _count);
 }
 
 /*
@@ -223,7 +228,7 @@ void *xlate_dev_mem_ptr(phys_addr_t addr)
 	void *bounce = (void *) addr;
 	unsigned long size;
 
-	get_online_cpus();
+	cpus_read_lock();
 	preempt_disable();
 	if (is_swapped(addr)) {
 		size = PAGE_SIZE - (addr & ~PAGE_MASK);
@@ -232,7 +237,7 @@ void *xlate_dev_mem_ptr(phys_addr_t addr)
 			memcpy_absolute(bounce, (void *) addr, size);
 	}
 	preempt_enable();
-	put_online_cpus();
+	cpus_read_unlock();
 	return bounce;
 }
 

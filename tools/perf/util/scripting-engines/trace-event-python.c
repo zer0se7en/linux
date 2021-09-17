@@ -687,7 +687,7 @@ static void set_sample_datasrc_in_dict(PyObject *dict,
 			_PyUnicode_FromString(decode));
 }
 
-static int regs_map(struct regs_dump *regs, uint64_t mask, char *bf, int size)
+static void regs_map(struct regs_dump *regs, uint64_t mask, char *bf, int size)
 {
 	unsigned int i = 0, r;
 	int printed = 0;
@@ -695,7 +695,7 @@ static int regs_map(struct regs_dump *regs, uint64_t mask, char *bf, int size)
 	bf[0] = 0;
 
 	if (!regs || !regs->regs)
-		return 0;
+		return;
 
 	for_each_set_bit(r, (unsigned long *) &mask, sizeof(mask) * 8) {
 		u64 val = regs->regs[i++];
@@ -704,8 +704,6 @@ static int regs_map(struct regs_dump *regs, uint64_t mask, char *bf, int size)
 				     "%5s:0x%" PRIx64 " ",
 				     perf_reg_name(r), val);
 	}
-
-	return printed;
 }
 
 static void set_regs_in_dict(PyObject *dict,
@@ -713,7 +711,16 @@ static void set_regs_in_dict(PyObject *dict,
 			     struct evsel *evsel)
 {
 	struct perf_event_attr *attr = &evsel->core.attr;
-	char bf[512];
+
+	/*
+	 * Here value 28 is a constant size which can be used to print
+	 * one register value and its corresponds to:
+	 * 16 chars is to specify 64 bit register in hexadecimal.
+	 * 2 chars is for appending "0x" to the hexadecimal value and
+	 * 10 chars is for register name.
+	 */
+	int size = __sw_hweight64(attr->sample_regs_intr) * 28;
+	char bf[size];
 
 	regs_map(&sample->intr_regs, attr->sample_regs_intr, bf, sizeof(bf));
 
@@ -1415,6 +1422,37 @@ static void python_process_event(union perf_event *event,
 	}
 }
 
+static void python_process_throttle(union perf_event *event,
+				    struct perf_sample *sample,
+				    struct machine *machine)
+{
+	const char *handler_name;
+	PyObject *handler, *t;
+
+	if (event->header.type == PERF_RECORD_THROTTLE)
+		handler_name = "throttle";
+	else
+		handler_name = "unthrottle";
+	handler = get_handler(handler_name);
+	if (!handler)
+		return;
+
+	t = tuple_new(6);
+	if (!t)
+		return;
+
+	tuple_set_u64(t, 0, event->throttle.time);
+	tuple_set_u64(t, 1, event->throttle.id);
+	tuple_set_u64(t, 2, event->throttle.stream_id);
+	tuple_set_s32(t, 3, sample->cpu);
+	tuple_set_s32(t, 4, sample->pid);
+	tuple_set_s32(t, 5, sample->tid);
+
+	call_object(handler, t, handler_name);
+
+	Py_DECREF(t);
+}
+
 static void python_do_process_switch(union perf_event *event,
 				     struct perf_sample *sample,
 				     struct machine *machine)
@@ -2072,5 +2110,6 @@ struct scripting_ops python_scripting_ops = {
 	.process_auxtrace_error	= python_process_auxtrace_error,
 	.process_stat		= python_process_stat,
 	.process_stat_interval	= python_process_stat_interval,
+	.process_throttle	= python_process_throttle,
 	.generate_script	= python_generate_script,
 };

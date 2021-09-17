@@ -122,6 +122,7 @@ endif
 
 LDFLAGS_vmlinux-y := -Bstatic
 LDFLAGS_vmlinux-$(CONFIG_RELOCATABLE) := -pie
+LDFLAGS_vmlinux-$(CONFIG_RELOCATABLE) += -z notext
 LDFLAGS_vmlinux	:= $(LDFLAGS_vmlinux-y)
 
 ifdef CONFIG_PPC64
@@ -267,9 +268,6 @@ head-$(CONFIG_PPC_FPU)		+= arch/powerpc/kernel/fpu.o
 head-$(CONFIG_ALTIVEC)		+= arch/powerpc/kernel/vector.o
 head-$(CONFIG_PPC_OF_BOOT_TRAMPOLINE)  += arch/powerpc/kernel/prom_init.o
 
-# See arch/powerpc/Kbuild for content of core part of the kernel
-core-y += arch/powerpc/
-
 # Default to zImage, override when needed
 all: zImage
 
@@ -410,7 +408,8 @@ endef
 
 PHONY += install
 install:
-	$(Q)$(MAKE) $(build)=$(boot) install
+	sh -x $(srctree)/$(boot)/install.sh "$(KERNELRELEASE)" vmlinux \
+	System.map "$(INSTALL_PATH)"
 
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
