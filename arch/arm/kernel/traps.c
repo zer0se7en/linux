@@ -67,12 +67,14 @@ void dump_backtrace_entry(unsigned long where, unsigned long from,
 {
 	unsigned long end = frame + 4 + sizeof(struct pt_regs);
 
-#ifdef CONFIG_KALLSYMS
+#ifndef CONFIG_KALLSYMS
+	printk("%sFunction entered at [<%08lx>] from [<%08lx>]\n",
+		loglvl, where, from);
+#elif defined CONFIG_BACKTRACE_VERBOSE
 	printk("%s[<%08lx>] (%ps) from [<%08lx>] (%pS)\n",
 		loglvl, where, (void *)where, from, (void *)from);
 #else
-	printk("%sFunction entered at [<%08lx>] from [<%08lx>]\n",
-		loglvl, where, from);
+	printk("%s %ps from %pS\n", loglvl, (void *)where, (void *)from);
 #endif
 
 	if (in_entry_text(from) && end <= ALIGN(frame, THREAD_SIZE))
@@ -136,7 +138,7 @@ static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
 		for (p = first, i = 0; i < 8 && p < top; i++, p += 4) {
 			if (p >= bottom && p < top) {
 				unsigned long val;
-				if (get_kernel_nofault(val, (unsigned long *)p))
+				if (!get_kernel_nofault(val, (unsigned long *)p))
 					sprintf(str + i * 9, " %08lx", val);
 				else
 					sprintf(str + i * 9, " ????????");
@@ -333,7 +335,7 @@ static void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 	if (panic_on_oops)
 		panic("Fatal exception");
 	if (signr)
-		do_exit(signr);
+		make_task_dead(signr);
 }
 
 /*
