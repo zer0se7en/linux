@@ -296,10 +296,9 @@ static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocat
 
 			if (policy == ALLOCATE_ANY)
 				return alloc;
-			if (policy == ALLOCATE_LEFT && IS_ALIGNED((unsigned long)alloc, PAGE_SIZE))
+			if (policy == ALLOCATE_LEFT && PAGE_ALIGNED(alloc))
 				return alloc;
-			if (policy == ALLOCATE_RIGHT &&
-			    !IS_ALIGNED((unsigned long)alloc, PAGE_SIZE))
+			if (policy == ALLOCATE_RIGHT && !PAGE_ALIGNED(alloc))
 				return alloc;
 		} else if (policy == ALLOCATE_NONE)
 			return alloc;
@@ -533,8 +532,8 @@ static void test_free_bulk(struct kunit *test)
 	int iter;
 
 	for (iter = 0; iter < 5; iter++) {
-		const size_t size = setup_test_cache(test, 8 + prandom_u32_max(300), 0,
-						     (iter & 1) ? ctor_set_x : NULL);
+		const size_t size = setup_test_cache(test, get_random_u32_inclusive(8, 307),
+						     0, (iter & 1) ? ctor_set_x : NULL);
 		void *objects[] = {
 			test_alloc(test, size, GFP_KERNEL, ALLOCATE_RIGHT),
 			test_alloc(test, size, GFP_KERNEL, ALLOCATE_NONE),
@@ -623,10 +622,11 @@ static void test_gfpzero(struct kunit *test)
 			break;
 		test_free(buf2);
 
-		if (i == CONFIG_KFENCE_NUM_OBJECTS) {
+		if (kthread_should_stop() || (i == CONFIG_KFENCE_NUM_OBJECTS)) {
 			kunit_warn(test, "giving up ... cannot get same object back\n");
 			return;
 		}
+		cond_resched();
 	}
 
 	for (i = 0; i < size; i++)
@@ -825,51 +825,28 @@ static void test_exit(struct kunit *test)
 	test_cache_destroy();
 }
 
+static int kfence_suite_init(struct kunit_suite *suite)
+{
+	register_trace_console(probe_console, NULL);
+	return 0;
+}
+
+static void kfence_suite_exit(struct kunit_suite *suite)
+{
+	unregister_trace_console(probe_console, NULL);
+	tracepoint_synchronize_unregister();
+}
+
 static struct kunit_suite kfence_test_suite = {
 	.name = "kfence",
 	.test_cases = kfence_test_cases,
 	.init = test_init,
 	.exit = test_exit,
+	.suite_init = kfence_suite_init,
+	.suite_exit = kfence_suite_exit,
 };
-static struct kunit_suite *kfence_test_suites[] = { &kfence_test_suite, NULL };
 
-static void register_tracepoints(struct tracepoint *tp, void *ignore)
-{
-	check_trace_callback_type_console(probe_console);
-	if (!strcmp(tp->name, "console"))
-		WARN_ON(tracepoint_probe_register(tp, probe_console, NULL));
-}
-
-static void unregister_tracepoints(struct tracepoint *tp, void *ignore)
-{
-	if (!strcmp(tp->name, "console"))
-		tracepoint_probe_unregister(tp, probe_console, NULL);
-}
-
-/*
- * We only want to do tracepoints setup and teardown once, therefore we have to
- * customize the init and exit functions and cannot rely on kunit_test_suite().
- */
-static int __init kfence_test_init(void)
-{
-	/*
-	 * Because we want to be able to build the test as a module, we need to
-	 * iterate through all known tracepoints, since the static registration
-	 * won't work here.
-	 */
-	for_each_kernel_tracepoint(register_tracepoints, NULL);
-	return __kunit_test_suites_init(kfence_test_suites);
-}
-
-static void kfence_test_exit(void)
-{
-	__kunit_test_suites_exit(kfence_test_suites);
-	for_each_kernel_tracepoint(unregister_tracepoints, NULL);
-	tracepoint_synchronize_unregister();
-}
-
-late_initcall_sync(kfence_test_init);
-module_exit(kfence_test_exit);
+kunit_test_suites(&kfence_test_suite);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Alexander Potapenko <glider@google.com>, Marco Elver <elver@google.com>");
