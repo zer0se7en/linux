@@ -27,7 +27,7 @@
  * and thus @kobj should have a namespace tag associated with it.  Returns
  * %NULL otherwise.
  */
-const void *kobject_namespace(const struct kobject *kobj)
+const struct ns_common *kobject_namespace(const struct kobject *kobj)
 {
 	const struct kobj_ns_type_operations *ns_ops = kobj_ns_ops(kobj);
 
@@ -54,6 +54,14 @@ void kobject_get_ownership(const struct kobject *kobj, kuid_t *uid, kgid_t *gid)
 
 	if (kobj->ktype->get_ownership)
 		kobj->ktype->get_ownership(kobj, uid, gid);
+}
+
+static bool kobj_ns_type_is_valid(enum kobj_ns_type type)
+{
+	if ((type <= KOBJ_NS_TYPE_NONE) || (type >= KOBJ_NS_TYPES))
+		return false;
+
+	return true;
 }
 
 static int create_dir(struct kobject *kobj)
@@ -86,8 +94,7 @@ static int create_dir(struct kobject *kobj)
 	 */
 	ops = kobj_child_ns_ops(kobj);
 	if (ops) {
-		BUG_ON(ops->type <= KOBJ_NS_TYPE_NONE);
-		BUG_ON(ops->type >= KOBJ_NS_TYPES);
+		BUG_ON(!kobj_ns_type_is_valid(ops->type));
 		BUG_ON(!kobj_ns_type_registered(ops->type));
 
 		sysfs_enable_ns(kobj->sd);
@@ -281,8 +288,7 @@ int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
 		kfree_const(s);
 		if (!t)
 			return -ENOMEM;
-		strreplace(t, '/', '!');
-		s = t;
+		s = strreplace(t, '/', '!');
 	}
 	kfree_const(kobj->name);
 	kobj->name = s;
@@ -759,7 +765,7 @@ static struct kobject *kobject_create(void)
 {
 	struct kobject *kobj;
 
-	kobj = kzalloc(sizeof(*kobj), GFP_KERNEL);
+	kobj = kzalloc_obj(*kobj);
 	if (!kobj)
 		return NULL;
 
@@ -854,6 +860,11 @@ int kset_register(struct kset *k)
 
 	if (!k)
 		return -EINVAL;
+
+	if (!k->kobj.ktype) {
+		pr_err("must have a ktype to be initialized properly!\n");
+		return -EINVAL;
+	}
 
 	kset_init(k);
 	err = kobject_add_internal(&k->kobj);
@@ -951,7 +962,7 @@ static struct kset *kset_create(const char *name,
 	struct kset *kset;
 	int retval;
 
-	kset = kzalloc(sizeof(*kset), GFP_KERNEL);
+	kset = kzalloc_obj(*kset);
 	if (!kset)
 		return NULL;
 	retval = kobject_set_name(&kset->kobj, "%s", name);
@@ -1018,11 +1029,7 @@ int kobj_ns_type_register(const struct kobj_ns_type_operations *ops)
 	spin_lock(&kobj_ns_type_lock);
 
 	error = -EINVAL;
-	if (type >= KOBJ_NS_TYPES)
-		goto out;
-
-	error = -EINVAL;
-	if (type <= KOBJ_NS_TYPE_NONE)
+	if (!kobj_ns_type_is_valid(type))
 		goto out;
 
 	error = -EBUSY;
@@ -1042,7 +1049,7 @@ int kobj_ns_type_registered(enum kobj_ns_type type)
 	int registered = 0;
 
 	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES))
+	if (kobj_ns_type_is_valid(type))
 		registered = kobj_ns_ops_tbl[type] != NULL;
 	spin_unlock(&kobj_ns_type_lock);
 
@@ -1069,21 +1076,19 @@ bool kobj_ns_current_may_mount(enum kobj_ns_type type)
 	bool may_mount = true;
 
 	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES) &&
-	    kobj_ns_ops_tbl[type])
+	if (kobj_ns_type_is_valid(type) && kobj_ns_ops_tbl[type])
 		may_mount = kobj_ns_ops_tbl[type]->current_may_mount();
 	spin_unlock(&kobj_ns_type_lock);
 
 	return may_mount;
 }
 
-void *kobj_ns_grab_current(enum kobj_ns_type type)
+struct ns_common *kobj_ns_grab_current(enum kobj_ns_type type)
 {
-	void *ns = NULL;
+	struct ns_common *ns = NULL;
 
 	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES) &&
-	    kobj_ns_ops_tbl[type])
+	if (kobj_ns_type_is_valid(type) && kobj_ns_ops_tbl[type])
 		ns = kobj_ns_ops_tbl[type]->grab_current_ns();
 	spin_unlock(&kobj_ns_type_lock);
 
@@ -1091,36 +1096,10 @@ void *kobj_ns_grab_current(enum kobj_ns_type type)
 }
 EXPORT_SYMBOL_GPL(kobj_ns_grab_current);
 
-const void *kobj_ns_netlink(enum kobj_ns_type type, struct sock *sk)
-{
-	const void *ns = NULL;
-
-	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES) &&
-	    kobj_ns_ops_tbl[type])
-		ns = kobj_ns_ops_tbl[type]->netlink_ns(sk);
-	spin_unlock(&kobj_ns_type_lock);
-
-	return ns;
-}
-
-const void *kobj_ns_initial(enum kobj_ns_type type)
-{
-	const void *ns = NULL;
-
-	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES) &&
-	    kobj_ns_ops_tbl[type])
-		ns = kobj_ns_ops_tbl[type]->initial_ns();
-	spin_unlock(&kobj_ns_type_lock);
-
-	return ns;
-}
-
-void kobj_ns_drop(enum kobj_ns_type type, void *ns)
+void kobj_ns_drop(enum kobj_ns_type type, struct ns_common *ns)
 {
 	spin_lock(&kobj_ns_type_lock);
-	if ((type > KOBJ_NS_TYPE_NONE) && (type < KOBJ_NS_TYPES) &&
+	if (kobj_ns_type_is_valid(type) &&
 	    kobj_ns_ops_tbl[type] && kobj_ns_ops_tbl[type]->drop_ns)
 		kobj_ns_ops_tbl[type]->drop_ns(ns);
 	spin_unlock(&kobj_ns_type_lock);

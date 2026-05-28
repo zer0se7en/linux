@@ -133,15 +133,15 @@ int saa7146_wait_for_debi_done(struct saa7146_dev *dev, int nobusyloop)
  ****************************************************************************/
 
 /* this is videobuf_vmalloc_to_sg() from videobuf-dma-sg.c
-   make sure virt has been allocated with vmalloc_32(), otherwise the BUG()
-   may be triggered on highmem machines */
+   make sure virt has been allocated with vmalloc_32(), otherwise return NULL
+   on highmem machines */
 static struct scatterlist* vmalloc_to_sg(unsigned char *virt, int nr_pages)
 {
 	struct scatterlist *sglist;
 	struct page *pg;
 	int i;
 
-	sglist = kmalloc_array(nr_pages, sizeof(struct scatterlist), GFP_KERNEL);
+	sglist = kmalloc_objs(struct scatterlist, nr_pages);
 	if (NULL == sglist)
 		return NULL;
 	sg_init_table(sglist, nr_pages);
@@ -150,7 +150,7 @@ static struct scatterlist* vmalloc_to_sg(unsigned char *virt, int nr_pages)
 		if (NULL == pg)
 			goto err;
 		if (WARN_ON(PageHighMem(pg)))
-			return NULL;
+			goto err;
 		sg_set_page(&sglist[i], pg, PAGE_SIZE, 0);
 	}
 	return sglist;
@@ -334,7 +334,7 @@ static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent
 	int err = -ENOMEM;
 
 	/* clear out mem for sure */
-	dev = kzalloc(sizeof(struct saa7146_dev), GFP_KERNEL);
+	dev = kzalloc_obj(struct saa7146_dev);
 	if (!dev) {
 		ERR("out of memory\n");
 		goto out;

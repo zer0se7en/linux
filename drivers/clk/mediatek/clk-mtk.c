@@ -13,6 +13,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 
 #include "clk-mtk.h"
@@ -66,7 +67,7 @@ struct clk_hw_onecell_data *mtk_alloc_clk_data(unsigned int clk_num)
 {
 	struct clk_hw_onecell_data *clk_data;
 
-	clk_data = kzalloc(struct_size(clk_data, hws, clk_num), GFP_KERNEL);
+	clk_data = kzalloc_flex(*clk_data, hws, clk_num);
 	if (!clk_data)
 		return NULL;
 
@@ -229,7 +230,7 @@ static struct clk_hw *mtk_clk_register_composite(struct device *dev,
 	int ret;
 
 	if (mc->mux_shift >= 0) {
-		mux = kzalloc(sizeof(*mux), GFP_KERNEL);
+		mux = kzalloc_obj(*mux);
 		if (!mux)
 			return ERR_PTR(-ENOMEM);
 
@@ -250,7 +251,7 @@ static struct clk_hw *mtk_clk_register_composite(struct device *dev,
 	}
 
 	if (mc->gate_shift >= 0) {
-		gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+		gate = kzalloc_obj(*gate);
 		if (!gate) {
 			ret = -ENOMEM;
 			goto err_out;
@@ -266,7 +267,7 @@ static struct clk_hw *mtk_clk_register_composite(struct device *dev,
 	}
 
 	if (mc->divider_shift >= 0) {
-		div = kzalloc(sizeof(*div), GFP_KERNEL);
+		div = kzalloc_obj(*div);
 		if (!div) {
 			ret = -ENOMEM;
 			goto err_out;
@@ -469,7 +470,7 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 	const struct platform_device_id *id;
 	const struct mtk_clk_desc *mcd;
 	struct clk_hw_onecell_data *clk_data;
-	void __iomem *base;
+	void __iomem *base = NULL;
 	int num_clks, r;
 
 	mcd = device_get_match_data(&pdev->dev);
@@ -483,8 +484,8 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 			return -EINVAL;
 	}
 
-	/* Composite clocks needs us to pass iomem pointer */
-	if (mcd->composite_clks) {
+	/* Composite and divider clocks needs us to pass iomem pointer */
+	if (mcd->composite_clks || mcd->divider_clks) {
 		if (!mcd->shared_io)
 			base = devm_platform_ioremap_resource(pdev, 0);
 		else
@@ -494,14 +495,30 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 			return IS_ERR(base) ? PTR_ERR(base) : -ENOMEM;
 	}
 
+
+	if (mcd->need_runtime_pm) {
+		r = devm_pm_runtime_enable(&pdev->dev);
+		if (r)
+			goto unmap_io;
+		/*
+		 * Do a pm_runtime_resume_and_get() to workaround a possible
+		 * deadlock between clk_register() and the genpd framework.
+		 */
+		r = pm_runtime_resume_and_get(&pdev->dev);
+		if (r)
+			goto unmap_io;
+	}
+
 	/* Calculate how many clk_hw_onecell_data entries to allocate */
 	num_clks = mcd->num_clks + mcd->num_composite_clks;
 	num_clks += mcd->num_fixed_clks + mcd->num_factor_clks;
 	num_clks += mcd->num_mux_clks + mcd->num_divider_clks;
 
 	clk_data = mtk_alloc_clk_data(num_clks);
-	if (!clk_data)
-		return -ENOMEM;
+	if (!clk_data) {
+		r = -ENOMEM;
+		goto free_base;
+	}
 
 	if (mcd->fixed_clks) {
 		r = mtk_clk_register_fixed_clks(mcd->fixed_clks,
@@ -572,6 +589,9 @@ static int __mtk_clk_simple_probe(struct platform_device *pdev,
 			goto unregister_clks;
 	}
 
+	if (mcd->need_runtime_pm)
+		pm_runtime_put(&pdev->dev);
+
 	return r;
 
 unregister_clks:
@@ -599,12 +619,16 @@ unregister_fixed_clks:
 					      mcd->num_fixed_clks, clk_data);
 free_data:
 	mtk_free_clk_data(clk_data);
+free_base:
+	if (mcd->need_runtime_pm)
+		pm_runtime_put(&pdev->dev);
+unmap_io:
 	if (mcd->shared_io && base)
 		iounmap(base);
 	return r;
 }
 
-static int __mtk_clk_simple_remove(struct platform_device *pdev,
+static void __mtk_clk_simple_remove(struct platform_device *pdev,
 				   struct device_node *node)
 {
 	struct clk_hw_onecell_data *clk_data = platform_get_drvdata(pdev);
@@ -629,8 +653,6 @@ static int __mtk_clk_simple_remove(struct platform_device *pdev,
 		mtk_clk_unregister_fixed_clks(mcd->fixed_clks,
 					      mcd->num_fixed_clks, clk_data);
 	mtk_free_clk_data(clk_data);
-
-	return 0;
 }
 
 int mtk_clk_pdev_probe(struct platform_device *pdev)
@@ -650,19 +672,35 @@ int mtk_clk_simple_probe(struct platform_device *pdev)
 }
 EXPORT_SYMBOL_GPL(mtk_clk_simple_probe);
 
-int mtk_clk_pdev_remove(struct platform_device *pdev)
+void mtk_clk_pdev_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *node = dev->parent->of_node;
 
-	return __mtk_clk_simple_remove(pdev, node);
+	__mtk_clk_simple_remove(pdev, node);
 }
 EXPORT_SYMBOL_GPL(mtk_clk_pdev_remove);
 
-int mtk_clk_simple_remove(struct platform_device *pdev)
+void mtk_clk_simple_remove(struct platform_device *pdev)
 {
-	return __mtk_clk_simple_remove(pdev, pdev->dev.of_node);
+	__mtk_clk_simple_remove(pdev, pdev->dev.of_node);
 }
 EXPORT_SYMBOL_GPL(mtk_clk_simple_remove);
+
+struct regmap *mtk_clk_get_hwv_regmap(struct device_node *node)
+{
+	struct device_node *hwv_node;
+	struct regmap *regmap_hwv;
+
+	hwv_node = of_parse_phandle(node, "mediatek,hardware-voter", 0);
+	if (!hwv_node)
+		return NULL;
+
+	regmap_hwv = device_node_to_regmap(hwv_node);
+	of_node_put(hwv_node);
+
+	return regmap_hwv;
+}
+EXPORT_SYMBOL_GPL(mtk_clk_get_hwv_regmap);
 
 MODULE_LICENSE("GPL");

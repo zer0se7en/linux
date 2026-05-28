@@ -25,7 +25,6 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <linux/list.h>
-#include <linux/zalloc.h>
 #ifndef REMOTE_UNWIND_LIBUNWIND
 #include <libunwind.h>
 #include <libunwind-ptrace.h>
@@ -302,40 +301,53 @@ static int unwind_spec_ehframe(struct dso *dso, struct machine *machine,
 	return 0;
 }
 
+struct read_unwind_spec_eh_frame_maps_cb_args {
+	struct dso *dso;
+	u64 base_addr;
+};
+
+static int read_unwind_spec_eh_frame_maps_cb(struct map *map, void *data)
+{
+
+	struct read_unwind_spec_eh_frame_maps_cb_args *args = data;
+
+	if (map__dso(map) == args->dso && map__start(map) - map__pgoff(map) < args->base_addr)
+		args->base_addr = map__start(map) - map__pgoff(map);
+
+	return 0;
+}
+
+
 static int read_unwind_spec_eh_frame(struct dso *dso, struct unwind_info *ui,
 				     u64 *table_data, u64 *segbase,
 				     u64 *fde_count)
 {
-	struct map_rb_node *map_node;
-	u64 base_addr = UINT64_MAX;
+	struct read_unwind_spec_eh_frame_maps_cb_args args = {
+		.dso = dso,
+		.base_addr = UINT64_MAX,
+	};
 	int ret, fd;
 
-	if (dso->data.eh_frame_hdr_offset == 0) {
-		fd = dso__data_get_fd(dso, ui->machine);
-		if (fd < 0)
+	if (dso__data(dso)->eh_frame_hdr_offset == 0) {
+		if (!dso__data_get_fd(dso, ui->machine, &fd))
 			return -EINVAL;
 
 		/* Check the .eh_frame section for unwinding info */
 		ret = elf_section_address_and_offset(fd, ".eh_frame_hdr",
-						     &dso->data.eh_frame_hdr_addr,
-						     &dso->data.eh_frame_hdr_offset);
-		dso->data.elf_base_addr = elf_base_address(fd);
+						     &dso__data(dso)->eh_frame_hdr_addr,
+						     &dso__data(dso)->eh_frame_hdr_offset);
+		dso__data(dso)->elf_base_addr = elf_base_address(fd);
 		dso__data_put_fd(dso);
-		if (ret || dso->data.eh_frame_hdr_offset == 0)
+		if (ret || dso__data(dso)->eh_frame_hdr_offset == 0)
 			return -EINVAL;
 	}
 
-	maps__for_each_entry(ui->thread->maps, map_node) {
-		struct map *map = map_node->map;
-		u64 start = map__start(map);
+	maps__for_each_map(thread__maps(ui->thread), read_unwind_spec_eh_frame_maps_cb, &args);
 
-		if (map__dso(map) == dso && start < base_addr)
-			base_addr = start;
-	}
-	base_addr -= dso->data.elf_base_addr;
+	args.base_addr -= dso__data(dso)->elf_base_addr;
 	/* Address of .eh_frame_hdr */
-	*segbase = base_addr + dso->data.eh_frame_hdr_addr;
-	ret = unwind_spec_ehframe(dso, ui->machine, dso->data.eh_frame_hdr_offset,
+	*segbase = args.base_addr + dso__data(dso)->eh_frame_hdr_addr;
+	ret = unwind_spec_ehframe(dso, ui->machine, dso__data(dso)->eh_frame_hdr_offset,
 				   table_data, fde_count);
 	if (ret)
 		return ret;
@@ -349,7 +361,7 @@ static int read_unwind_spec_debug_frame(struct dso *dso,
 					struct machine *machine, u64 *offset)
 {
 	int fd;
-	u64 ofs = dso->data.debug_frame_offset;
+	u64 ofs = dso__data(dso)->debug_frame_offset;
 
 	/* debug_frame can reside in:
 	 *  - dso
@@ -358,14 +370,13 @@ static int read_unwind_spec_debug_frame(struct dso *dso,
 	 *    has to be pointed by symsrc_filename
 	 */
 	if (ofs == 0) {
-		fd = dso__data_get_fd(dso, machine);
-		if (fd >= 0) {
+		if (dso__data_get_fd(dso, machine, &fd)) {
 			ofs = elf_section_offset(fd, ".debug_frame");
 			dso__data_put_fd(dso);
 		}
 
 		if (ofs <= 0) {
-			fd = open(dso->symsrc_filename, O_RDONLY);
+			fd = open(dso__symsrc_filename(dso), O_RDONLY);
 			if (fd >= 0) {
 				ofs = elf_section_offset(fd, ".debug_frame");
 				close(fd);
@@ -375,6 +386,11 @@ static int read_unwind_spec_debug_frame(struct dso *dso,
 		if (ofs <= 0) {
 			char *debuglink = malloc(PATH_MAX);
 			int ret = 0;
+
+			if (debuglink == NULL) {
+				pr_err("unwind: Can't read unwind spec debug frame.\n");
+				return -ENOMEM;
+			}
 
 			ret = dso__read_binary_type_filename(
 				dso, DSO_BINARY_TYPE__DEBUGLINK,
@@ -388,21 +404,21 @@ static int read_unwind_spec_debug_frame(struct dso *dso,
 				}
 			}
 			if (ofs > 0) {
-				if (dso->symsrc_filename != NULL) {
+				if (dso__symsrc_filename(dso) != NULL) {
 					pr_warning(
 						"%s: overwrite symsrc(%s,%s)\n",
 							__func__,
-							dso->symsrc_filename,
+							dso__symsrc_filename(dso),
 							debuglink);
-					zfree(&dso->symsrc_filename);
+					dso__free_symsrc_filename(dso);
 				}
-				dso->symsrc_filename = debuglink;
+				dso__set_symsrc_filename(dso, debuglink);
 			} else {
 				free(debuglink);
 			}
 		}
 
-		dso->data.debug_frame_offset = ofs;
+		dso__data(dso)->debug_frame_offset = ofs;
 	}
 
 	*offset = ofs;
@@ -416,7 +432,13 @@ static int read_unwind_spec_debug_frame(struct dso *dso,
 static struct map *find_map(unw_word_t ip, struct unwind_info *ui)
 {
 	struct addr_location al;
-	return thread__find_map(ui->thread, PERF_RECORD_MISC_USER, ip, &al);
+	struct map *ret;
+
+	addr_location__init(&al);
+	thread__find_map(ui->thread, PERF_RECORD_MISC_USER, ip, &al);
+	ret = map__get(al.map);
+	addr_location__exit(&al);
+	return ret;
 }
 
 static int
@@ -435,10 +457,12 @@ find_proc_info(unw_addr_space_t as, unw_word_t ip, unw_proc_info_t *pi,
 		return -EINVAL;
 
 	dso = map__dso(map);
-	if (!dso)
+	if (!dso) {
+		map__put(map);
 		return -EINVAL;
+	}
 
-	pr_debug("unwind: find_proc_info dso %s\n", dso->name);
+	pr_debug("unwind: find_proc_info dso %s\n", dso__name(dso));
 
 	/* Check the .eh_frame section for unwinding info */
 	if (!read_unwind_spec_eh_frame(dso, ui, &table_data, &segbase, &fde_count)) {
@@ -458,24 +482,26 @@ find_proc_info(unw_addr_space_t as, unw_word_t ip, unw_proc_info_t *pi,
 	/* Check the .debug_frame section for unwinding info */
 	if (ret < 0 &&
 	    !read_unwind_spec_debug_frame(dso, ui->machine, &segbase)) {
-		int fd = dso__data_get_fd(dso, ui->machine);
-		int is_exec = elf_is_exec(fd, dso->name);
+		int fd;
 		u64 start = map__start(map);
-		unw_word_t base = is_exec ? 0 : start;
+		unw_word_t base = start;
 		const char *symfile;
 
-		if (fd >= 0)
+		if (dso__data_get_fd(dso, ui->machine, &fd)) {
+			if (elf_is_exec(fd, dso__name(dso)))
+				base = 0;
 			dso__data_put_fd(dso);
+		}
 
-		symfile = dso->symsrc_filename ?: dso->name;
+		symfile = dso__symsrc_filename(dso) ?: dso__name(dso);
 
 		memset(&di, 0, sizeof(di));
 		if (dwarf_find_debug_frame(0, &di, ip, base, symfile, start, map__end(map)))
-			return dwarf_search_unwind_table(as, ip, &di, pi,
-							 need_unwind_info, arg);
+			ret = dwarf_search_unwind_table(as, ip, &di, pi,
+							need_unwind_info, arg);
 	}
 #endif
-
+	map__put(map);
 	return ret;
 }
 
@@ -529,12 +555,14 @@ static int access_dso_mem(struct unwind_info *ui, unw_word_t addr,
 
 	dso = map__dso(map);
 
-	if (!dso)
+	if (!dso) {
+		map__put(map);
 		return -1;
+	}
 
 	size = dso__data_read_addr(dso, map, ui->machine,
 				   addr, (u8 *) data, sizeof(*data));
-
+	map__put(map);
 	return !(size == sizeof(*data));
 }
 
@@ -549,13 +577,15 @@ static int access_mem(unw_addr_space_t __maybe_unused as,
 	int ret;
 
 	/* Don't support write, probably not needed. */
-	if (__write || !stack || !ui->sample->user_regs.regs) {
+	if (__write || !stack || !ui->sample->user_regs || !ui->sample->user_regs->regs) {
 		*valp = 0;
 		return 0;
 	}
 
-	ret = perf_reg_value(&start, &ui->sample->user_regs,
-			     LIBUNWIND__ARCH_REG_SP);
+	ret = perf_reg_value(&start, perf_sample__user_regs(ui->sample),
+			     perf_arch_reg_sp(thread__e_machine(ui->thread,
+								ui->machine,
+								/*e_flags=*/NULL)));
 	if (ret)
 		return ret;
 
@@ -598,7 +628,7 @@ static int access_reg(unw_addr_space_t __maybe_unused as,
 		return 0;
 	}
 
-	if (!ui->sample->user_regs.regs) {
+	if (!ui->sample->user_regs || !ui->sample->user_regs->regs) {
 		*valp = 0;
 		return 0;
 	}
@@ -607,7 +637,7 @@ static int access_reg(unw_addr_space_t __maybe_unused as,
 	if (id < 0)
 		return -EINVAL;
 
-	ret = perf_reg_value(&val, &ui->sample->user_regs, id);
+	ret = perf_reg_value(&val, perf_sample__user_regs(ui->sample), id);
 	if (ret) {
 		if (!ui->best_effort)
 			pr_err("unwind: can't read reg %d\n", regnum);
@@ -631,18 +661,22 @@ static int entry(u64 ip, struct thread *thread,
 {
 	struct unwind_entry e;
 	struct addr_location al;
+	int ret;
 
+	addr_location__init(&al);
 	e.ms.sym = thread__find_symbol(thread, PERF_RECORD_MISC_USER, ip, &al);
 	e.ip     = ip;
 	e.ms.map = al.map;
-	e.ms.maps = al.maps;
+	e.ms.thread = thread__get(al.thread);
 
 	pr_debug("unwind: %s:ip = 0x%" PRIx64 " (0x%" PRIx64 ")\n",
 		 al.sym ? al.sym->name : "''",
 		 ip,
 		 al.map ? map__map_ip(al.map, ip) : (u64) 0);
 
-	return cb(&e, arg);
+	ret = cb(&e, arg);
+	addr_location__exit(&al);
+	return ret;
 }
 
 static void display_error(int err)
@@ -677,7 +711,7 @@ static int _unwind__prepare_access(struct maps *maps)
 {
 	void *addr_space = unw_create_addr_space(&accessors, 0);
 
-	RC_CHK_ACCESS(maps)->addr_space = addr_space;
+	maps__set_addr_space(maps, addr_space);
 	if (!addr_space) {
 		pr_err("unwind: Can't create unwind address space.\n");
 		return -ENOMEM;
@@ -700,14 +734,15 @@ static void _unwind__finish_access(struct maps *maps)
 static int get_entries(struct unwind_info *ui, unwind_entry_cb_t cb,
 		       void *arg, int max_stack)
 {
+	uint16_t e_machine = thread__e_machine(ui->thread, ui->machine, /*e_flags=*/NULL);
 	u64 val;
 	unw_word_t ips[max_stack];
 	unw_addr_space_t addr_space;
 	unw_cursor_t c;
 	int ret, i = 0;
 
-	ret = perf_reg_value(&val, &ui->sample->user_regs,
-			     LIBUNWIND__ARCH_REG_IP);
+	ret = perf_reg_value(&val, perf_sample__user_regs(ui->sample),
+			     perf_arch_reg_ip(e_machine));
 	if (ret)
 		return ret;
 
@@ -719,7 +754,7 @@ static int get_entries(struct unwind_info *ui, unwind_entry_cb_t cb,
 	 */
 	if (max_stack - 1 > 0) {
 		WARN_ONCE(!ui->thread, "WARNING: ui->thread is NULL");
-		addr_space = maps__addr_space(ui->thread->maps);
+		addr_space = maps__addr_space(thread__maps(ui->thread));
 
 		if (addr_space == NULL)
 			return -1;
@@ -769,11 +804,11 @@ static int _unwind__get_entries(unwind_entry_cb_t cb, void *arg,
 	struct unwind_info ui = {
 		.sample       = data,
 		.thread       = thread,
-		.machine      = maps__machine(thread->maps),
+		.machine      = maps__machine(thread__maps(thread)),
 		.best_effort  = best_effort
 	};
 
-	if (!data->user_regs.regs)
+	if (!data->user_regs || !data->user_regs->regs)
 		return -EINVAL;
 
 	if (max_stack <= 0)

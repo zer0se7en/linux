@@ -87,36 +87,13 @@ struct nlmsghdr *handshake_genl_put(struct sk_buff *msg,
 }
 EXPORT_SYMBOL(handshake_genl_put);
 
-/*
- * dup() a kernel socket for use as a user space file descriptor
- * in the current process. The kernel socket must have an
- * instatiated struct file.
- *
- * Implicit argument: "current()"
- */
-static int handshake_dup(struct socket *sock)
-{
-	struct file *file;
-	int newfd;
-
-	file = get_file(sock->file);
-	newfd = get_unused_fd_flags(O_CLOEXEC);
-	if (newfd < 0) {
-		fput(file);
-		return newfd;
-	}
-
-	fd_install(newfd, file);
-	return newfd;
-}
-
 int handshake_nl_accept_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = sock_net(skb->sk);
 	struct handshake_net *hn = handshake_pernet(net);
 	struct handshake_req *req = NULL;
 	struct socket *sock;
-	int class, fd, err;
+	int class, err;
 
 	err = -EOPNOTSUPP;
 	if (!hn)
@@ -129,26 +106,28 @@ int handshake_nl_accept_doit(struct sk_buff *skb, struct genl_info *info)
 
 	err = -EAGAIN;
 	req = handshake_req_next(hn, class);
-	if (!req)
-		goto out_status;
+	if (req) {
+		sock = req->hr_sk->sk_socket;
 
-	sock = req->hr_sk->sk_socket;
-	fd = handshake_dup(sock);
-	if (fd < 0) {
-		err = fd;
-		goto out_complete;
-	}
-	err = req->hr_proto->hp_accept(req, info, fd);
-	if (err) {
-		fput(sock->file);
-		goto out_complete;
-	}
+		FD_PREPARE(fdf, O_CLOEXEC, sock->file);
+		if (fdf.err) {
+			err = fdf.err;
+			goto out_complete;
+		}
 
-	trace_handshake_cmd_accept(net, req, req->hr_sk, fd);
-	return 0;
+		get_file(sock->file); /* FD_PREPARE() consumes a reference. */
+		err = req->hr_proto->hp_accept(req, info, fd_prepare_fd(fdf));
+		if (err)
+			goto out_complete; /* Automatic cleanup handles fput */
+
+		trace_handshake_cmd_accept(net, req, req->hr_sk, fd_prepare_fd(fdf));
+		fd_publish(fdf);
+		return 0;
+	}
 
 out_complete:
-	handshake_complete(req, -EIO, NULL);
+	if (req)
+		handshake_complete(req, -EIO, NULL);
 out_status:
 	trace_handshake_cmd_accept_err(net, req, NULL, err);
 	return err;
@@ -157,26 +136,24 @@ out_status:
 int handshake_nl_done_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = sock_net(skb->sk);
-	struct handshake_req *req = NULL;
-	struct socket *sock = NULL;
+	struct handshake_req *req;
+	struct socket *sock;
 	int fd, status, err;
 
 	if (GENL_REQ_ATTR_CHECK(info, HANDSHAKE_A_DONE_SOCKFD))
 		return -EINVAL;
-	fd = nla_get_u32(info->attrs[HANDSHAKE_A_DONE_SOCKFD]);
+	fd = nla_get_s32(info->attrs[HANDSHAKE_A_DONE_SOCKFD]);
 
-	err = 0;
 	sock = sockfd_lookup(fd, &err);
-	if (err) {
-		err = -EBADF;
-		goto out_status;
-	}
+	if (!sock)
+		return err;
 
 	req = handshake_req_hash_lookup(sock->sk);
 	if (!req) {
 		err = -EBUSY;
-		fput(sock->file);
-		goto out_status;
+		trace_handshake_cmd_done_err(net, req, sock->sk, err);
+		sockfd_put(sock);
+		return err;
 	}
 
 	trace_handshake_cmd_done(net, req, sock->sk, fd);
@@ -186,12 +163,8 @@ int handshake_nl_done_doit(struct sk_buff *skb, struct genl_info *info)
 		status = nla_get_u32(info->attrs[HANDSHAKE_A_DONE_STATUS]);
 
 	handshake_complete(req, status, info);
-	fput(sock->file);
+	sockfd_put(sock);
 	return 0;
-
-out_status:
-	trace_handshake_cmd_done_err(net, req, sock->sk, err);
-	return err;
 }
 
 static unsigned int handshake_net_id;

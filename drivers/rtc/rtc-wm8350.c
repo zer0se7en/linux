@@ -386,8 +386,6 @@ static int wm8350_rtc_probe(struct platform_device *pdev)
 	/* enable the RTC if it's not already enabled */
 	power5 = wm8350_reg_read(wm8350, WM8350_POWER_MGMT_5);
 	if (!(power5 &  WM8350_RTC_TICK_ENA)) {
-		dev_info(wm8350->dev, "Starting RTC\n");
-
 		wm8350_reg_unlock(wm8350);
 
 		ret = wm8350_set_bits(wm8350, WM8350_POWER_MGMT_5,
@@ -422,15 +420,12 @@ static int wm8350_rtc_probe(struct platform_device *pdev)
 		}
 	}
 
-	device_init_wakeup(&pdev->dev, 1);
+	device_init_wakeup(&pdev->dev, true);
 
 	wm_rtc->rtc = devm_rtc_device_register(&pdev->dev, "wm8350",
 					&wm8350_rtc_ops, THIS_MODULE);
-	if (IS_ERR(wm_rtc->rtc)) {
-		ret = PTR_ERR(wm_rtc->rtc);
-		dev_err(&pdev->dev, "failed to register RTC: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(wm_rtc->rtc))
+		return PTR_ERR(wm_rtc->rtc);
 
 	ret = wm8350_register_irq(wm8350, WM8350_IRQ_RTC_SEC,
 			    wm8350_rtc_update_handler, 0,
@@ -464,7 +459,7 @@ static SIMPLE_DEV_PM_OPS(wm8350_rtc_pm_ops, wm8350_rtc_suspend,
 
 static struct platform_driver wm8350_rtc_driver = {
 	.probe = wm8350_rtc_probe,
-	.remove_new = wm8350_rtc_remove,
+	.remove = wm8350_rtc_remove,
 	.driver = {
 		.name = "wm8350-rtc",
 		.pm = &wm8350_rtc_pm_ops,

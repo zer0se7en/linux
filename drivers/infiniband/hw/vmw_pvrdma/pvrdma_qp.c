@@ -49,6 +49,7 @@
 #include <rdma/ib_addr.h>
 #include <rdma/ib_smi.h>
 #include <rdma/ib_user_verbs.h>
+#include <rdma/uverbs_ioctl.h>
 
 #include "pvrdma.h"
 
@@ -252,10 +253,9 @@ int pvrdma_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 			dev_dbg(&dev->pdev->dev,
 				"create queuepair from user space\n");
 
-			if (ib_copy_from_udata(&ucmd, udata, sizeof(ucmd))) {
-				ret = -EFAULT;
+			ret = ib_copy_validate_udata_in(udata, ucmd, qp_addr);
+			if (ret)
 				goto err_qp;
-			}
 
 			/* Userspace supports qpn and qp handles? */
 			if (dev->dsr_version >= PVRDMA_QPHANDLE_VERSION &&
@@ -704,14 +704,6 @@ int pvrdma_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		if (unlikely(wr->num_sge > qp->sq.max_sg || wr->num_sge < 0)) {
 			dev_warn_ratelimited(&dev->pdev->dev,
 					     "send SGE overflow\n");
-			*bad_wr = wr;
-			ret = -EINVAL;
-			goto out;
-		}
-
-		if (unlikely(wr->opcode < 0)) {
-			dev_warn_ratelimited(&dev->pdev->dev,
-					     "invalid send opcode\n");
 			*bad_wr = wr;
 			ret = -EINVAL;
 			goto out;

@@ -80,7 +80,6 @@ int pfn_is_nosave(unsigned long pfn)
 
 void notrace save_processor_state(void)
 {
-	WARN_ON(num_online_cpus() != 1);
 }
 
 void notrace restore_processor_state(void)
@@ -416,7 +415,7 @@ int hibernate_resume_nonboot_cpu_disable(void)
 
 static int __init riscv_hibernate_init(void)
 {
-	hibernate_cpu_context = kzalloc(sizeof(*hibernate_cpu_context), GFP_KERNEL);
+	hibernate_cpu_context = kzalloc_obj(*hibernate_cpu_context);
 
 	if (WARN_ON(!hibernate_cpu_context))
 		return -ENOMEM;

@@ -26,7 +26,7 @@ static const u32 max98373_sdw_cache_reg[] = {
 	MAX98373_R20B6_BDE_CUR_STATE_READBACK,
 };
 
-static struct reg_default max98373_reg[] = {
+static const struct reg_default max98373_reg[] = {
 	{MAX98373_R0040_SCP_INIT_STAT_1, 0x00},
 	{MAX98373_R0041_SCP_INIT_MASK_1, 0x00},
 	{MAX98373_R0042_SCP_INIT_STAT_2, 0x00},
@@ -246,7 +246,7 @@ static const struct regmap_config max98373_sdw_regmap = {
 };
 
 /* Power management functions and structure */
-static __maybe_unused int max98373_suspend(struct device *dev)
+static int max98373_suspend(struct device *dev)
 {
 	struct max98373_priv *max98373 = dev_get_drvdata(dev);
 	int i;
@@ -262,7 +262,7 @@ static __maybe_unused int max98373_suspend(struct device *dev)
 
 #define MAX98373_PROBE_TIMEOUT 5000
 
-static __maybe_unused int max98373_resume(struct device *dev)
+static int max98373_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct max98373_priv *max98373 = dev_get_drvdata(dev);
@@ -292,8 +292,8 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops max98373_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(max98373_suspend, max98373_resume)
-	SET_RUNTIME_PM_OPS(max98373_suspend, max98373_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(max98373_suspend, max98373_resume)
+	RUNTIME_PM_OPS(max98373_suspend, max98373_resume, NULL)
 };
 
 static int max98373_read_prop(struct sdw_slave *slave)
@@ -361,27 +361,16 @@ static int max98373_io_init(struct sdw_slave *slave)
 	struct device *dev = &slave->dev;
 	struct max98373_priv *max98373 = dev_get_drvdata(dev);
 
-	if (max98373->first_hw_init) {
-		regcache_cache_only(max98373->regmap, false);
+	regcache_cache_only(max98373->regmap, false);
+	if (max98373->first_hw_init)
 		regcache_cache_bypass(max98373->regmap, true);
-	}
 
 	/*
-	 * PM runtime is only enabled when a Slave reports as Attached
+	 * PM runtime status is marked as 'active' only when a Slave reports as Attached
 	 */
-	if (!max98373->first_hw_init) {
-		/* set autosuspend parameters */
-		pm_runtime_set_autosuspend_delay(dev, 3000);
-		pm_runtime_use_autosuspend(dev);
-
+	if (!max98373->first_hw_init)
 		/* update count of parent 'active' children */
 		pm_runtime_set_active(dev);
-
-		/* make sure the device does not suspend immediately */
-		pm_runtime_mark_last_busy(dev);
-
-		pm_runtime_enable(dev);
-	}
 
 	pm_runtime_get_noresume(dev);
 
@@ -469,7 +458,6 @@ static int max98373_io_init(struct sdw_slave *slave)
 	max98373->first_hw_init = true;
 	max98373->hw_init = true;
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return 0;
@@ -753,6 +741,8 @@ static int max98373_init(struct sdw_slave *slave, struct regmap *regmap)
 	max98373->regmap = regmap;
 	max98373->slave = slave;
 
+	regcache_cache_only(max98373->regmap, true);
+
 	max98373->cache_num = ARRAY_SIZE(max98373_sdw_cache_reg);
 	max98373->cache = devm_kcalloc(dev, max98373->cache_num,
 				       sizeof(*max98373->cache),
@@ -773,10 +763,27 @@ static int max98373_init(struct sdw_slave *slave, struct regmap *regmap)
 	ret = devm_snd_soc_register_component(dev, &soc_codec_dev_max98373_sdw,
 					      max98373_sdw_dai,
 					      ARRAY_SIZE(max98373_sdw_dai));
-	if (ret < 0)
+	if (ret < 0) {
 		dev_err(dev, "Failed to register codec: %d\n", ret);
+		return ret;
+	}
 
-	return ret;
+	/* set autosuspend parameters */
+	pm_runtime_set_autosuspend_delay(dev, 3000);
+	pm_runtime_use_autosuspend(dev);
+
+	/* make sure the device does not suspend immediately */
+	pm_runtime_mark_last_busy(dev);
+
+	pm_runtime_enable(dev);
+
+	/* important note: the device is NOT tagged as 'active' and will remain
+	 * 'suspended' until the hardware is enumerated/initialized. This is required
+	 * to make sure the ASoC framework use of pm_runtime_get_sync() does not silently
+	 * fail with -EACCESS because of race conditions between card creation and enumeration
+	 */
+
+	return 0;
 }
 
 static int max98373_update_status(struct sdw_slave *slave,
@@ -813,7 +820,7 @@ static int max98373_bus_config(struct sdw_slave *slave,
  * slave_ops: callbacks for get_clock_stop_mode, clock_stop and
  * port_prep are not defined for now
  */
-static struct sdw_slave_ops max98373_slave_ops = {
+static const struct sdw_slave_ops max98373_slave_ops = {
 	.read_prop = max98373_read_prop,
 	.update_status = max98373_update_status,
 	.bus_config = max98373_bus_config,
@@ -832,14 +839,9 @@ static int max98373_sdw_probe(struct sdw_slave *slave,
 	return max98373_init(slave, regmap);
 }
 
-static int max98373_sdw_remove(struct sdw_slave *slave)
+static void max98373_sdw_remove(struct sdw_slave *slave)
 {
-	struct max98373_priv *max98373 = dev_get_drvdata(&slave->dev);
-
-	if (max98373->first_hw_init)
-		pm_runtime_disable(&slave->dev);
-
-	return 0;
+	pm_runtime_disable(&slave->dev);
 }
 
 #if defined(CONFIG_OF)
@@ -867,10 +869,9 @@ MODULE_DEVICE_TABLE(sdw, max98373_id);
 static struct sdw_driver max98373_sdw_driver = {
 	.driver = {
 		.name = "max98373",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(max98373_of_match),
 		.acpi_match_table = ACPI_PTR(max98373_acpi_match),
-		.pm = &max98373_pm,
+		.pm = pm_ptr(&max98373_pm),
 	},
 	.probe = max98373_sdw_probe,
 	.remove = max98373_sdw_remove,

@@ -176,6 +176,15 @@ static int qede_sriov_configure(struct pci_dev *pdev, int num_vfs_param)
 }
 #endif
 
+static int __maybe_unused qede_suspend(struct device *dev)
+{
+	dev_info(dev, "Device does not support suspend operation\n");
+
+	return -EOPNOTSUPP;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(qede_pm_ops, qede_suspend, NULL);
+
 static const struct pci_error_handlers qede_err_handler = {
 	.error_detected = qede_io_error_detected,
 };
@@ -190,10 +199,11 @@ static struct pci_driver qede_pci_driver = {
 	.sriov_configure = qede_sriov_configure,
 #endif
 	.err_handler = &qede_err_handler,
+	.driver.pm = &qede_pm_ops,
 };
 
 static struct qed_eth_cb_ops qede_ll_ops = {
-	{
+	.common = {
 #ifdef CONFIG_RFS_ACCEL
 		.arfs_filter_op = qede_arfs_filter_op,
 #endif
@@ -496,25 +506,6 @@ static int qede_set_vf_trust(struct net_device *dev, int vfidx, bool setting)
 }
 #endif
 
-static int qede_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-	struct qede_dev *edev = netdev_priv(dev);
-
-	if (!netif_running(dev))
-		return -EAGAIN;
-
-	switch (cmd) {
-	case SIOCSHWTSTAMP:
-		return qede_ptp_hw_ts(edev, ifr);
-	default:
-		DP_VERBOSE(edev, QED_MSG_DEBUG,
-			   "default IOCTL cmd 0x%x\n", cmd);
-		return -EOPNOTSUPP;
-	}
-
-	return 0;
-}
-
 static void qede_fp_sb_dump(struct qede_dev *edev, struct qede_fastpath *fp)
 {
 	char *p_sb = (char *)fp->sb_info->sb_virt;
@@ -707,7 +698,6 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_set_mac_address	= qede_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_change_mtu		= qede_change_mtu,
-	.ndo_eth_ioctl		= qede_ioctl,
 	.ndo_tx_timeout		= qede_tx_timeout,
 #ifdef CONFIG_QED_SRIOV
 	.ndo_set_vf_mac		= qede_set_vf_mac,
@@ -732,6 +722,8 @@ static const struct net_device_ops qede_netdev_ops = {
 #endif
 	.ndo_xdp_xmit		= qede_xdp_transmit,
 	.ndo_setup_tc		= qede_setup_tc_offload,
+	.ndo_hwtstamp_get	= qede_hwtstamp_get,
+	.ndo_hwtstamp_set	= qede_hwtstamp_set,
 };
 
 static const struct net_device_ops qede_netdev_vf_ops = {
@@ -971,17 +963,15 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 	struct qede_fastpath *fp;
 	int i;
 
-	edev->fp_array = kcalloc(QEDE_QUEUE_CNT(edev),
-				 sizeof(*edev->fp_array), GFP_KERNEL);
+	edev->fp_array = kzalloc_objs(*edev->fp_array, QEDE_QUEUE_CNT(edev));
 	if (!edev->fp_array) {
 		DP_NOTICE(edev, "fp array allocation failed\n");
 		goto err;
 	}
 
 	if (!edev->coal_entry) {
-		edev->coal_entry = kcalloc(QEDE_MAX_RSS_CNT(edev),
-					   sizeof(*edev->coal_entry),
-					   GFP_KERNEL);
+		edev->coal_entry = kzalloc_objs(*edev->coal_entry,
+						QEDE_MAX_RSS_CNT(edev));
 		if (!edev->coal_entry) {
 			DP_ERR(edev, "coalesce entry allocation failed\n");
 			goto err;
@@ -998,7 +988,7 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 	for_each_queue(i) {
 		fp = &edev->fp_array[i];
 
-		fp->sb_info = kzalloc(sizeof(*fp->sb_info), GFP_KERNEL);
+		fp->sb_info = kzalloc_obj(*fp->sb_info);
 		if (!fp->sb_info) {
 			DP_NOTICE(edev, "sb info struct allocation failed\n");
 			goto err;
@@ -1015,20 +1005,18 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 		}
 
 		if (fp->type & QEDE_FASTPATH_TX) {
-			fp->txq = kcalloc(edev->dev_info.num_tc,
-					  sizeof(*fp->txq), GFP_KERNEL);
+			fp->txq = kzalloc_objs(*fp->txq, edev->dev_info.num_tc);
 			if (!fp->txq)
 				goto err;
 		}
 
 		if (fp->type & QEDE_FASTPATH_RX) {
-			fp->rxq = kzalloc(sizeof(*fp->rxq), GFP_KERNEL);
+			fp->rxq = kzalloc_obj(*fp->rxq);
 			if (!fp->rxq)
 				goto err;
 
 			if (edev->xdp_prog) {
-				fp->xdp_tx = kzalloc(sizeof(*fp->xdp_tx),
-						     GFP_KERNEL);
+				fp->xdp_tx = kzalloc_obj(*fp->xdp_tx);
 				if (!fp->xdp_tx)
 					goto err;
 				fp->type |= QEDE_FASTPATH_XDP;

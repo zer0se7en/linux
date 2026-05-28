@@ -13,18 +13,20 @@
 .*
 *.a
 *.asn1.[ch]
+*.bc
 *.bin
 *.bz2
 *.c.[012]*.*
-*.cover
 *.dt.yaml
 *.dtb
 *.dtbo
 *.dtb.S
 *.dtbo.S
 *.dwo
+*.dylib
 *.elf
 *.gcno
+*.gcda
 *.gz
 *.i
 *.ko
@@ -34,12 +36,13 @@
 *.lz4
 *.lzma
 *.lzo
-*.mbx
 *.mod
 *.mod.c
 *.o
 *.o.*
 *.patch
+*.pyc
+*.rlib
 *.rmeta
 *.rpm
 *.rsi
@@ -48,13 +51,12 @@
 *.so.dbg
 *.su
 *.symtypes
-*.symversions
 *.tab.[ch]
 *.tar
-*.usyms
 *.xz
 *.zst
 Module.symvers
+dtbs-list
 modules.order
 
 #
@@ -66,18 +68,19 @@ modules.order
 /vmlinux.32
 /vmlinux.map
 /vmlinux.symvers
+/vmlinux.unstripped
 /vmlinux-gdb.py
 /vmlinuz
 /System.map
 /Module.markers
 /modules.builtin
 /modules.builtin.modinfo
+/modules.builtin.ranges
 /modules.nsdeps
 
 #
 # RPM spec file (make rpm-pkg)
 #
-/*.spec
 /rpmbuild/
 
 #
@@ -96,15 +99,24 @@ modules.order
 /tar-install/
 
 #
+# pacman files (make pacman-pkg)
+#
+/PKGBUILD
+/pacman/
+
+#
 # We don't want to ignore the following even if they are dot-files
 #
 !.clang-format
+!.clippy.toml
 !.cocciconfig
+!.editorconfig
 !.get_maintainer.ignore
 !.gitattributes
 !.gitignore
 !.kunitconfig
 !.mailmap
+!.pylintrc
 !.rustfmt.toml
 
 #
@@ -112,7 +124,6 @@ modules.order
 #
 /include/config/
 /include/generated/
-/include/ksym/
 /arch/*/include/generated/
 
 # stgit generated dirs
@@ -124,6 +135,7 @@ series
 
 # ctags files
 tags
+!tags/
 TAGS
 
 # cscope files
@@ -139,7 +151,6 @@ GTAGS
 # id-utils files
 ID
 
-*.orig
 *~
 \#*#
 
@@ -167,10 +178,13 @@ x509.genkey
 *.kdev4
 
 # Clang's compilation database file
-/compile_commands.json
+compile_commands.json
 
 # Documentation toolchain
 sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+
+# bc language scripts (not LLVM bitcode)
+!kernel/time/timeconst.bc

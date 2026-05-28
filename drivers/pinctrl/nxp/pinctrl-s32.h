@@ -16,7 +16,7 @@ struct platform_device;
 /**
  * struct s32_pin_group - describes an S32 pin group
  * @data: generic data describes group name, number of pins, and a pin array in
-	this group.
+ *	this group.
  * @pin_sss: an array of source signal select configs paired with pin array.
  */
 struct s32_pin_group {
@@ -34,24 +34,28 @@ struct s32_pin_range {
 	unsigned int end;
 };
 
-struct s32_pinctrl_soc_info {
-	struct device *dev;
+struct s32_pinctrl_soc_data {
 	const struct pinctrl_pin_desc *pins;
 	unsigned int npins;
+	const struct s32_pin_range *mem_pin_ranges;
+	unsigned int mem_regions;
+};
+
+struct s32_pinctrl_soc_info {
+	struct device *dev;
+	const struct s32_pinctrl_soc_data *soc_data;
 	struct s32_pin_group *groups;
 	unsigned int ngroups;
 	struct pinfunction *functions;
 	unsigned int nfunctions;
 	unsigned int grp_index;
-	const struct s32_pin_range *mem_pin_ranges;
-	unsigned int mem_regions;
 };
 
 #define S32_PINCTRL_PIN(pin)	PINCTRL_PIN(pin, #pin)
 #define S32_PIN_RANGE(_start, _end) { .start = _start, .end = _end }
 
 int s32_pinctrl_probe(struct platform_device *pdev,
-			struct s32_pinctrl_soc_info *info);
+		      const struct s32_pinctrl_soc_data *soc_data);
 int s32_pinctrl_resume(struct device *dev);
 int s32_pinctrl_suspend(struct device *dev);
 #endif /* __DRIVERS_PINCTRL_S32_H */

@@ -4,21 +4,31 @@
 
 #include <linux/preempt.h>
 #include <asm/cmpxchg.h>
+#include <asm/march.h>
 
 /*
  * s390 uses its own implementation for per cpu data, the offset of
  * the cpu local data area is cached in the cpu's lowcore memory.
  */
-#define __my_cpu_offset S390_lowcore.percpu_offset
+#define __my_cpu_offset get_lowcore()->percpu_offset
 
-/*
- * For 64 bit module code, the module may be more than 4G above the
- * per cpu area, use weak definitions to force the compiler to
- * generate external references.
- */
-#if defined(MODULE)
-#define ARCH_NEEDS_WEAK_PER_CPU
-#endif
+#define arch_raw_cpu_ptr(_ptr)						\
+({									\
+	unsigned long lc_percpu, tcp_ptr__;				\
+									\
+	tcp_ptr__ = (__force unsigned long)(_ptr);			\
+	lc_percpu = offsetof(struct lowcore, percpu_offset);		\
+	asm_inline volatile(						\
+	ALTERNATIVE("ag		%[__ptr__],%[offzero](%%r0)\n",		\
+		    "ag		%[__ptr__],%[offalt](%%r0)\n",		\
+		    ALT_FEATURE(MFEATURE_LOWCORE))			\
+	: [__ptr__] "+d" (tcp_ptr__)					\
+	: [offzero] "i" (lc_percpu),					\
+	  [offalt] "i" (lc_percpu + LOWCORE_ALT_ADDRESS),		\
+	  "m" (((struct lowcore *)0)->percpu_offset)			\
+	: "cc");							\
+	(TYPEOF_UNQUAL(*(_ptr)) __force __kernel *)tcp_ptr__;		\
+})
 
 /*
  * We use a compare-and-swap loop since that uses less cpu cycles than
@@ -50,7 +60,7 @@
 #define this_cpu_or_1(pcp, val)		arch_this_cpu_to_op_simple(pcp, val, |)
 #define this_cpu_or_2(pcp, val)		arch_this_cpu_to_op_simple(pcp, val, |)
 
-#ifndef CONFIG_HAVE_MARCH_Z196_FEATURES
+#ifndef MARCH_HAS_Z196_FEATURES
 
 #define this_cpu_add_4(pcp, val)	arch_this_cpu_to_op_simple(pcp, val, +)
 #define this_cpu_add_8(pcp, val)	arch_this_cpu_to_op_simple(pcp, val, +)
@@ -61,7 +71,7 @@
 #define this_cpu_or_4(pcp, val)		arch_this_cpu_to_op_simple(pcp, val, |)
 #define this_cpu_or_8(pcp, val)		arch_this_cpu_to_op_simple(pcp, val, |)
 
-#else /* CONFIG_HAVE_MARCH_Z196_FEATURES */
+#else /* MARCH_HAS_Z196_FEATURES */
 
 #define arch_this_cpu_add(pcp, val, op1, op2, szcast)			\
 {									\
@@ -73,13 +83,13 @@
 	if (__builtin_constant_p(val__) &&				\
 	    ((szcast)val__ > -129) && ((szcast)val__ < 128)) {		\
 		asm volatile(						\
-			op2 "   %[ptr__],%[val__]\n"			\
+			op2 "   %[ptr__],%[val__]"			\
 			: [ptr__] "+Q" (*ptr__) 			\
 			: [val__] "i" ((szcast)val__)			\
 			: "cc");					\
 	} else {							\
 		asm volatile(						\
-			op1 "   %[old__],%[val__],%[ptr__]\n"		\
+			op1 "   %[old__],%[val__],%[ptr__]"		\
 			: [old__] "=d" (old__), [ptr__] "+Q" (*ptr__)	\
 			: [val__] "d" (val__)				\
 			: "cc");					\
@@ -98,7 +108,7 @@
 	preempt_disable_notrace();					\
 	ptr__ = raw_cpu_ptr(&(pcp));	 				\
 	asm volatile(							\
-		op "    %[old__],%[val__],%[ptr__]\n"			\
+		op "    %[old__],%[val__],%[ptr__]"			\
 		: [old__] "=d" (old__), [ptr__] "+Q" (*ptr__)		\
 		: [val__] "d" (val__)					\
 		: "cc");						\
@@ -117,7 +127,7 @@
 	preempt_disable_notrace();					\
 	ptr__ = raw_cpu_ptr(&(pcp));	 				\
 	asm volatile(							\
-		op "    %[old__],%[val__],%[ptr__]\n"			\
+		op "    %[old__],%[val__],%[ptr__]"			\
 		: [old__] "=d" (old__), [ptr__] "+Q" (*ptr__)		\
 		: [val__] "d" (val__)					\
 		: "cc");						\
@@ -129,7 +139,7 @@
 #define this_cpu_or_4(pcp, val)		arch_this_cpu_to_op(pcp, val, "lao")
 #define this_cpu_or_8(pcp, val)		arch_this_cpu_to_op(pcp, val, "laog")
 
-#endif /* CONFIG_HAVE_MARCH_Z196_FEATURES */
+#endif /* MARCH_HAS_Z196_FEATURES */
 
 #define arch_this_cpu_cmpxchg(pcp, oval, nval)				\
 ({									\
@@ -148,6 +158,22 @@
 #define this_cpu_cmpxchg_4(pcp, oval, nval) arch_this_cpu_cmpxchg(pcp, oval, nval)
 #define this_cpu_cmpxchg_8(pcp, oval, nval) arch_this_cpu_cmpxchg(pcp, oval, nval)
 
+#define this_cpu_cmpxchg64(pcp, o, n)	this_cpu_cmpxchg_8(pcp, o, n)
+
+#define this_cpu_cmpxchg128(pcp, oval, nval)				\
+({									\
+	typedef typeof(pcp) pcp_op_T__;					\
+	u128 old__, new__, ret__;					\
+	pcp_op_T__ *ptr__;						\
+	old__ = oval;							\
+	new__ = nval;							\
+	preempt_disable_notrace();					\
+	ptr__ = raw_cpu_ptr(&(pcp));					\
+	ret__ = cmpxchg128((void *)ptr__, old__, new__);		\
+	preempt_enable_notrace();					\
+	ret__;								\
+})
+
 #define arch_this_cpu_xchg(pcp, nval)					\
 ({									\
 	typeof(pcp) *ptr__;						\
@@ -163,24 +189,6 @@
 #define this_cpu_xchg_2(pcp, nval) arch_this_cpu_xchg(pcp, nval)
 #define this_cpu_xchg_4(pcp, nval) arch_this_cpu_xchg(pcp, nval)
 #define this_cpu_xchg_8(pcp, nval) arch_this_cpu_xchg(pcp, nval)
-
-#define arch_this_cpu_cmpxchg_double(pcp1, pcp2, o1, o2, n1, n2)	    \
-({									    \
-	typeof(pcp1) *p1__;						    \
-	typeof(pcp2) *p2__;						    \
-	int ret__;							    \
-									    \
-	preempt_disable_notrace();					    \
-	p1__ = raw_cpu_ptr(&(pcp1));					    \
-	p2__ = raw_cpu_ptr(&(pcp2));					    \
-	ret__ = __cmpxchg_double((unsigned long)p1__, (unsigned long)p2__,  \
-				 (unsigned long)(o1), (unsigned long)(o2),  \
-				 (unsigned long)(n1), (unsigned long)(n2)); \
-	preempt_enable_notrace();					    \
-	ret__;								    \
-})
-
-#define this_cpu_cmpxchg_double_8 arch_this_cpu_cmpxchg_double
 
 #include <asm-generic/percpu.h>
 

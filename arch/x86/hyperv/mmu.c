@@ -1,6 +1,5 @@
 #define pr_fmt(fmt)  "Hyper-V: " fmt
 
-#include <linux/hyperv.h>
 #include <linux/log2.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -61,7 +60,6 @@ static void hyperv_flush_tlb_multi(const struct cpumask *cpus,
 				   const struct flush_tlb_info *info)
 {
 	int cpu, vcpu, gva_n, max_gvas;
-	struct hv_tlb_flush **flush_pcpu;
 	struct hv_tlb_flush *flush;
 	u64 status;
 	unsigned long flags;
@@ -74,10 +72,7 @@ static void hyperv_flush_tlb_multi(const struct cpumask *cpus,
 
 	local_irq_save(flags);
 
-	flush_pcpu = (struct hv_tlb_flush **)
-		     this_cpu_ptr(hyperv_pcpu_input_arg);
-
-	flush = *flush_pcpu;
+	flush = *this_cpu_ptr(hyperv_pcpu_input_arg);
 
 	if (unlikely(!flush)) {
 		local_irq_restore(flags);
@@ -178,17 +173,13 @@ static u64 hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 				      const struct flush_tlb_info *info)
 {
 	int nr_bank = 0, max_gvas, gva_n;
-	struct hv_tlb_flush_ex **flush_pcpu;
 	struct hv_tlb_flush_ex *flush;
 	u64 status;
 
 	if (!(ms_hyperv.hints & HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED))
 		return HV_STATUS_INVALID_PARAMETER;
 
-	flush_pcpu = (struct hv_tlb_flush_ex **)
-		     this_cpu_ptr(hyperv_pcpu_input_arg);
-
-	flush = *flush_pcpu;
+	flush = *this_cpu_ptr(hyperv_pcpu_input_arg);
 
 	if (info->mm) {
 		/*
@@ -214,6 +205,10 @@ static u64 hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 	/*
 	 * We can flush not more than max_gvas with one hypercall. Flush the
 	 * whole address space if we were asked to do more.
+	 *
+	 * For these hypercalls, Hyper-V treats the valid_bank_mask field
+	 * of flush->hv_vp_set as part of the fixed size input header.
+	 * So the variable input header size is equal to nr_bank.
 	 */
 	max_gvas =
 		(PAGE_SIZE - sizeof(*flush) - nr_bank *
@@ -248,5 +243,4 @@ void hyperv_setup_mmu_ops(void)
 
 	pr_info("Using hypercall for remote TLB flush\n");
 	pv_ops.mmu.flush_tlb_multi = hyperv_flush_tlb_multi;
-	pv_ops.mmu.tlb_remove_table = tlb_remove_table;
 }

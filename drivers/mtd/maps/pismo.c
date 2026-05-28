@@ -218,7 +218,7 @@ static int pismo_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	pismo = kzalloc(sizeof(*pismo), GFP_KERNEL);
+	pismo = kzalloc_obj(*pismo);
 	if (!pismo)
 		return -ENOMEM;
 
@@ -259,7 +259,7 @@ static struct i2c_driver pismo_driver = {
 	.driver	= {
 		.name	= "pismo",
 	},
-	.probe_new	= pismo_probe,
+	.probe		= pismo_probe,
 	.remove		= pismo_remove,
 	.id_table	= pismo_id,
 };

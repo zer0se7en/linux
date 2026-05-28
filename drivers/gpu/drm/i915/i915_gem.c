@@ -37,18 +37,16 @@
 #include <linux/mman.h>
 
 #include <drm/drm_cache.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vma_manager.h>
-
-#include "display/intel_display.h"
-#include "display/intel_frontbuffer.h"
 
 #include "gem/i915_gem_clflush.h"
 #include "gem/i915_gem_context.h"
 #include "gem/i915_gem_ioctls.h"
 #include "gem/i915_gem_mman.h"
+#include "gem/i915_gem_object_frontbuffer.h"
 #include "gem/i915_gem_pm.h"
 #include "gem/i915_gem_region.h"
-#include "gem/i915_gem_userptr.h"
 #include "gt/intel_engine_user.h"
 #include "gt/intel_gt.h"
 #include "gt/intel_gt_pm.h"
@@ -420,8 +418,11 @@ i915_gem_gtt_pread(struct drm_i915_gem_object *obj,
 		page_length = remain < page_length ? remain : page_length;
 		if (drm_mm_node_allocated(&node)) {
 			ggtt->vm.insert_page(&ggtt->vm,
-					     i915_gem_object_get_dma_address(obj, offset >> PAGE_SHIFT),
-					     node.start, I915_CACHE_NONE, 0);
+					     i915_gem_object_get_dma_address(obj,
+									     offset >> PAGE_SHIFT),
+					     node.start,
+					     i915_gem_get_pat_index(i915,
+								    I915_CACHE_NONE), 0);
 		} else {
 			page_base += offset & PAGE_MASK;
 		}
@@ -519,7 +520,7 @@ ggtt_write(struct io_mapping *mapping,
 
 	/* We can use the cpu mem copy function because this is X86. */
 	vaddr = io_mapping_map_atomic_wc(mapping, base);
-	unwritten = __copy_from_user_inatomic_nocache((void __force *)vaddr + offset,
+	unwritten = copy_from_user_inatomic_nontemporal((void __force *)vaddr + offset,
 						      user_data, length);
 	io_mapping_unmap_atomic(vaddr);
 	if (unwritten) {
@@ -578,7 +579,7 @@ i915_gem_gtt_pwrite_fast(struct drm_i915_gem_object *obj,
 		goto out_rpm;
 	}
 
-	i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
+	i915_gem_object_frontbuffer_invalidate(obj, ORIGIN_CPU);
 
 	user_data = u64_to_user_ptr(args->data_ptr);
 	offset = args->offset;
@@ -598,8 +599,11 @@ i915_gem_gtt_pwrite_fast(struct drm_i915_gem_object *obj,
 			/* flush the write before we modify the GGTT */
 			intel_gt_flush_ggtt_writes(ggtt->vm.gt);
 			ggtt->vm.insert_page(&ggtt->vm,
-					     i915_gem_object_get_dma_address(obj, offset >> PAGE_SHIFT),
-					     node.start, I915_CACHE_NONE, 0);
+					     i915_gem_object_get_dma_address(obj,
+									     offset >> PAGE_SHIFT),
+					     node.start,
+					     i915_gem_get_pat_index(i915,
+								    I915_CACHE_NONE), 0);
 			wmb(); /* flush modifications to the GGTT (insert_page) */
 		} else {
 			page_base += offset & PAGE_MASK;
@@ -622,7 +626,7 @@ i915_gem_gtt_pwrite_fast(struct drm_i915_gem_object *obj,
 	}
 
 	intel_gt_flush_ggtt_writes(ggtt->vm.gt);
-	i915_gem_object_flush_frontbuffer(obj, ORIGIN_CPU);
+	i915_gem_object_frontbuffer_flush(obj, ORIGIN_CPU);
 
 	i915_gem_gtt_cleanup(obj, &node, vma);
 out_rpm:
@@ -710,7 +714,7 @@ i915_gem_shmem_pwrite(struct drm_i915_gem_object *obj,
 		offset = 0;
 	}
 
-	i915_gem_object_flush_frontbuffer(obj, ORIGIN_CPU);
+	i915_gem_object_frontbuffer_flush(obj, ORIGIN_CPU);
 
 	i915_gem_object_unpin_pages(obj);
 	return ret;
@@ -844,8 +848,7 @@ void i915_gem_runtime_suspend(struct drm_i915_private *i915)
 	/*
 	 * Only called during RPM suspend. All users of the userfault_list
 	 * must be holding an RPM wakeref to ensure that this can not
-	 * run concurrently with themselves (and use the struct_mutex for
-	 * protection between themselves).
+	 * run concurrently with themselves.
 	 */
 
 	list_for_each_entry_safe(obj, on,
@@ -1142,13 +1145,22 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
 	unsigned int i;
 	int ret;
 
+	/*
+	 * In the process of replacing cache_level with pat_index a tricky
+	 * dependency is created on the definition of the enum i915_cache_level.
+	 * In case this enum is changed, PTE encode would be broken.
+	 * Add a WARNING here. And remove when we completely quit using this
+	 * enum.
+	 */
+	BUILD_BUG_ON(I915_CACHE_NONE != 0 ||
+		     I915_CACHE_LLC != 1 ||
+		     I915_CACHE_L3_LLC != 2 ||
+		     I915_CACHE_WT != 3 ||
+		     I915_MAX_CACHE_LEVEL != 4);
+
 	/* We need to fallback to 4K pages if host doesn't support huge gtt. */
 	if (intel_vgpu_active(dev_priv) && !intel_vgpu_has_huge_gtt(dev_priv))
 		RUNTIME_INFO(dev_priv)->page_sizes = I915_GTT_PAGE_SIZE_4K;
-
-	ret = i915_gem_init_userptr(dev_priv);
-	if (ret)
-		return ret;
 
 	for_each_gt(gt, dev_priv, i) {
 		intel_uc_fetch_firmwares(&gt->uc);
@@ -1172,13 +1184,20 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
 	 *
 	 * FIXME: break up the workarounds and apply them at the right time!
 	 */
-	intel_clock_gating_init(dev_priv);
+	intel_clock_gating_init(&dev_priv->drm);
 
 	for_each_gt(gt, dev_priv, i) {
 		ret = intel_gt_init(gt);
 		if (ret)
 			goto err_unlock;
 	}
+
+	/*
+	 * Register engines early to ensure the engine list is in its final
+	 * rb-tree form, lowering the amount of code that has to deal with
+	 * the intermediate llist state.
+	 */
+	intel_engines_driver_register(dev_priv);
 
 	return 0;
 
@@ -1216,7 +1235,7 @@ err_unlock:
 		/* Minimal basic recovery for KMS */
 		ret = i915_ggtt_enable_hw(dev_priv);
 		i915_ggtt_resume(to_gt(dev_priv)->ggtt);
-		intel_clock_gating_init(dev_priv);
+		intel_clock_gating_init(&dev_priv->drm);
 	}
 
 	i915_gem_drain_freed_objects(dev_priv);
@@ -1227,8 +1246,6 @@ err_unlock:
 void i915_gem_driver_register(struct drm_i915_private *i915)
 {
 	i915_gem_driver_register__shrinker(i915);
-
-	intel_engines_driver_register(i915);
 }
 
 void i915_gem_driver_unregister(struct drm_i915_private *i915)
@@ -1283,7 +1300,7 @@ void i915_gem_init_early(struct drm_i915_private *dev_priv)
 	i915_gem_init__mm(dev_priv);
 	i915_gem_init__contexts(dev_priv);
 
-	spin_lock_init(&dev_priv->display.fb_tracking.lock);
+	spin_lock_init(&dev_priv->frontbuffer_lock);
 }
 
 void i915_gem_cleanup_early(struct drm_i915_private *dev_priv)
@@ -1302,15 +1319,13 @@ int i915_gem_open(struct drm_i915_private *i915, struct drm_file *file)
 
 	drm_dbg(&i915->drm, "\n");
 
-	file_priv = kzalloc(sizeof(*file_priv), GFP_KERNEL);
+	file_priv = kzalloc_obj(*file_priv);
 	if (!file_priv)
 		goto err_alloc;
 
-	client = i915_drm_client_add(&i915->clients);
-	if (IS_ERR(client)) {
-		ret = PTR_ERR(client);
+	client = i915_drm_client_alloc();
+	if (!client)
 		goto err_client;
-	}
 
 	file->driver_priv = file_priv;
 	file_priv->i915 = i915;

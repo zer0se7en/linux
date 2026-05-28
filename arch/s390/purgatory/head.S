@@ -100,7 +100,7 @@ SYM_CODE_START(purgatory_start)
 	 * checksum verification only (%r2 = 0 -> verification only).
 	 *
 	 * Check now and preserve over C function call by storing in
-	 * %r10 whith
+	 * %r10 with
 	 *	1 -> checksum verification only
 	 *	0 -> load new kernel
 	 */
@@ -156,7 +156,7 @@ SYM_CODE_START(purgatory_start)
 	agr	%r10,%r9
 
 	/* Buffer location (in crash memory) and size. As the purgatory is
-	 * behind the point of no return it can re-use the stack as buffer.
+	 * behind the point of no return it can reuse the stack as buffer.
 	 */
 	larl	%r11,purgatory_end
 	larl	%r12,stack

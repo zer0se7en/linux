@@ -2,7 +2,7 @@
  * Broadcom BCM63XX High Speed SPI Controller driver
  *
  * Copyright 2000-2010 Broadcom Corporation
- * Copyright 2012-2013 Jonas Gorski <jogo@openwrt.org>
+ * Copyright 2012-2013 Jonas Gorski <jonas.gorski@gmail.com>
  *
  * Licensed under the GNU/GPL. See COPYING for details.
  */
@@ -142,6 +142,7 @@ struct bcm63xx_hsspi {
 	u32 wait_mode;
 	u32 xfer_mode;
 	u32 prepend_cnt;
+	u32 md_start;
 	u8 *prepend_buf;
 };
 
@@ -149,7 +150,7 @@ static ssize_t wait_mode_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(ctrl);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(ctrl);
 
 	return sprintf(buf, "%d\n", bs->wait_mode);
 }
@@ -158,7 +159,7 @@ static ssize_t wait_mode_store(struct device *dev, struct device_attribute *attr
 			  const char *buf, size_t count)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(ctrl);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(ctrl);
 	u32 val;
 
 	if (kstrtou32(buf, 10, &val))
@@ -185,7 +186,7 @@ static ssize_t xfer_mode_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(ctrl);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(ctrl);
 
 	return sprintf(buf, "%d\n", bs->xfer_mode);
 }
@@ -194,7 +195,7 @@ static ssize_t xfer_mode_store(struct device *dev, struct device_attribute *attr
 			  const char *buf, size_t count)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(ctrl);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(ctrl);
 	u32 val;
 
 	if (kstrtou32(buf, 10, &val))
@@ -262,24 +263,26 @@ static int bcm63xx_hsspi_wait_cmd(struct bcm63xx_hsspi *bs)
 	return rc;
 }
 
-static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
+static bool bcm63xx_prepare_prepend_transfer(struct spi_controller *host,
 					  struct spi_message *msg,
 					  struct spi_transfer *t_prepend)
 {
 
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(master);
-	bool tx_only = false;
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(host);
+	bool tx_only = false, multidata = false;
 	struct spi_transfer *t;
 
 	/*
 	 * Multiple transfers within a message may be combined into one transfer
 	 * to the controller using its prepend feature. A SPI message is prependable
 	 * only if the following are all true:
-	 *   1. One or more half duplex write transfer in single bit mode
-	 *   2. Optional full duplex read/write at the end
-	 *   3. No delay and cs_change between transfers
+	 *   1. One or more half duplex write transfers at the start
+	 *   2. Optional switch from single to dual bit within the write transfers
+	 *   3. Optional full duplex read/write at the end if all single bit
+	 *   4. No delay and cs_change between transfers
 	 */
 	bs->prepend_cnt = 0;
+	bs->md_start = 0;
 	list_for_each_entry(t, &msg->transfers, transfer_list) {
 		if ((spi_delay_to_ns(&t->delay, t) > 0) || t->cs_change) {
 			bcm63xx_prepend_printk_on_checkfail(bs,
@@ -297,21 +300,34 @@ static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
 				return false;
 			}
 
-			if (t->tx_nbits > SPI_NBITS_SINGLE &&
-				!list_is_last(&t->transfer_list, &msg->transfers)) {
+			if (t->tx_nbits == SPI_NBITS_SINGLE &&
+			    !list_is_last(&t->transfer_list, &msg->transfers) &&
+			    multidata) {
 				bcm63xx_prepend_printk_on_checkfail(bs,
-					 "multi-bit prepend buf not supported!\n");
+					 "single-bit after multi-bit not supported!\n");
 				return false;
 			}
 
-			if (t->tx_nbits == SPI_NBITS_SINGLE) {
-				memcpy(bs->prepend_buf + bs->prepend_cnt, t->tx_buf, t->len);
-				bs->prepend_cnt += t->len;
-			}
+			if (t->tx_nbits > SPI_NBITS_SINGLE)
+				multidata = true;
+
+			memcpy(bs->prepend_buf + bs->prepend_cnt, t->tx_buf, t->len);
+			bs->prepend_cnt += t->len;
+
+			if (t->tx_nbits == SPI_NBITS_SINGLE)
+				bs->md_start += t->len;
+
 		} else {
 			if (!list_is_last(&t->transfer_list, &msg->transfers)) {
 				bcm63xx_prepend_printk_on_checkfail(bs,
 					 "rx/tx_rx transfer not supported when it is not last one!\n");
+				return false;
+			}
+
+			if (t->rx_buf && t->rx_nbits == SPI_NBITS_SINGLE &&
+			    multidata) {
+				bcm63xx_prepend_printk_on_checkfail(bs,
+					 "single-bit after multi-bit not supported!\n");
 				return false;
 			}
 		}
@@ -319,9 +335,9 @@ static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
 		if (list_is_last(&t->transfer_list, &msg->transfers)) {
 			memcpy(t_prepend, t, sizeof(struct spi_transfer));
 
-			if (tx_only && t->tx_nbits == SPI_NBITS_SINGLE) {
+			if (tx_only) {
 				/*
-				 * if the last one is also a single bit tx only transfer, merge
+				 * if the last one is also a tx only transfer, merge
 				 * all of them into one single tx transfer
 				 */
 				t_prepend->len = bs->prepend_cnt;
@@ -329,7 +345,7 @@ static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
 				bs->prepend_cnt = 0;
 			} else {
 				/*
-				 * if the last one is not a tx only transfer or dual tx xfer, all
+				 * if the last one is not a tx only transfer, all
 				 * the previous transfers are sent through prepend bytes and
 				 * make sure it does not exceed the max prepend len
 				 */
@@ -338,6 +354,15 @@ static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
 						"exceed max prepend len, abort prepending transfers!\n");
 					return false;
 				}
+			}
+			/*
+			 * If switching from single-bit to multi-bit, make sure
+			 * the start offset does not exceed the maximum
+			 */
+			if (multidata && bs->md_start > HSSPI_MAX_PREPEND_LEN) {
+				bcm63xx_prepend_printk_on_checkfail(bs,
+					"exceed max multi-bit offset, abort prepending transfers!\n");
+				return false;
 			}
 		}
 	}
@@ -348,7 +373,7 @@ static bool bcm63xx_prepare_prepend_transfer(struct spi_master *master,
 static int bcm63xx_hsspi_do_prepend_txrx(struct spi_device *spi,
 					 struct spi_transfer *t)
 {
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(spi->master);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(spi->controller);
 	unsigned int chip_select = spi_get_chipselect(spi, 0);
 	u16 opcode = 0, val;
 	const u8 *tx = t->tx_buf;
@@ -381,11 +406,11 @@ static int bcm63xx_hsspi_do_prepend_txrx(struct spi_device *spi,
 
 		if (t->rx_nbits == SPI_NBITS_DUAL) {
 			reg |= 1 << MODE_CTRL_MULTIDATA_RD_SIZE_SHIFT;
-			reg |= bs->prepend_cnt << MODE_CTRL_MULTIDATA_RD_STRT_SHIFT;
+			reg |= bs->md_start << MODE_CTRL_MULTIDATA_RD_STRT_SHIFT;
 		}
 		if (t->tx_nbits == SPI_NBITS_DUAL) {
 			reg |= 1 << MODE_CTRL_MULTIDATA_WR_SIZE_SHIFT;
-			reg |= bs->prepend_cnt << MODE_CTRL_MULTIDATA_WR_STRT_SHIFT;
+			reg |= bs->md_start << MODE_CTRL_MULTIDATA_WR_STRT_SHIFT;
 		}
 	}
 
@@ -467,7 +492,7 @@ static void bcm63xx_hsspi_set_clk(struct bcm63xx_hsspi *bs,
 
 static int bcm63xx_hsspi_do_txrx(struct spi_device *spi, struct spi_transfer *t)
 {
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(spi->master);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(spi->controller);
 	unsigned int chip_select = spi_get_chipselect(spi, 0);
 	u16 opcode = 0, val;
 	int pending = t->len;
@@ -541,7 +566,7 @@ static int bcm63xx_hsspi_do_txrx(struct spi_device *spi, struct spi_transfer *t)
 
 static int bcm63xx_hsspi_setup(struct spi_device *spi)
 {
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(spi->master);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(spi->controller);
 	u32 reg;
 
 	reg = __raw_readl(bs->regs +
@@ -579,7 +604,7 @@ static int bcm63xx_hsspi_setup(struct spi_device *spi)
 static int bcm63xx_hsspi_do_dummy_cs_txrx(struct spi_device *spi,
 				      struct spi_message *msg)
 {
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(spi->master);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(spi->controller);
 	int status = -EINVAL;
 	int dummy_cs;
 	bool keep_cs = false;
@@ -653,10 +678,10 @@ static int bcm63xx_hsspi_do_dummy_cs_txrx(struct spi_device *spi,
 	return status;
 }
 
-static int bcm63xx_hsspi_transfer_one(struct spi_master *master,
+static int bcm63xx_hsspi_transfer_one(struct spi_controller *host,
 				      struct spi_message *msg)
 {
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(master);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(host);
 	struct spi_device *spi = msg->spi;
 	int status = -EINVAL;
 	bool prependable = false;
@@ -665,7 +690,7 @@ static int bcm63xx_hsspi_transfer_one(struct spi_master *master,
 	mutex_lock(&bs->msg_mutex);
 
 	if (bs->xfer_mode != HSSPI_XFER_MODE_DUMMYCS)
-		prependable = bcm63xx_prepare_prepend_transfer(master, msg, &t_prepend);
+		prependable = bcm63xx_prepare_prepend_transfer(host, msg, &t_prepend);
 
 	if (prependable) {
 		status = bcm63xx_hsspi_do_prepend_txrx(spi, &t_prepend);
@@ -681,7 +706,7 @@ static int bcm63xx_hsspi_transfer_one(struct spi_master *master,
 
 	mutex_unlock(&bs->msg_mutex);
 	msg->status = status;
-	spi_finalize_current_message(master);
+	spi_finalize_current_message(host);
 
 	return 0;
 }
@@ -690,13 +715,6 @@ static bool bcm63xx_hsspi_mem_supports_op(struct spi_mem *mem,
 			    const struct spi_mem_op *op)
 {
 	if (!spi_mem_default_supports_op(mem, op))
-		return false;
-
-	/* Controller doesn't support spi mem dual io mode */
-	if ((op->cmd.opcode == SPINOR_OP_READ_1_2_2) ||
-		(op->cmd.opcode == SPINOR_OP_READ_1_2_2_4B) ||
-		(op->cmd.opcode == SPINOR_OP_READ_1_2_2_DTR) ||
-		(op->cmd.opcode == SPINOR_OP_READ_1_2_2_DTR_4B))
 		return false;
 
 	return true;
@@ -723,7 +741,7 @@ static irqreturn_t bcm63xx_hsspi_interrupt(int irq, void *dev_id)
 
 static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 {
-	struct spi_master *master;
+	struct spi_controller *host;
 	struct bcm63xx_hsspi *bs;
 	void __iomem *regs;
 	struct device *dev = &pdev->dev;
@@ -740,52 +758,36 @@ static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	clk = devm_clk_get(dev, "hsspi");
-
+	clk = devm_clk_get_enabled(dev, "hsspi");
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
 
-	reset = devm_reset_control_get_optional_exclusive(dev, NULL);
+	reset = devm_reset_control_get_optional_shared(dev, NULL);
 	if (IS_ERR(reset))
 		return PTR_ERR(reset);
 
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
-
 	ret = reset_control_reset(reset);
-	if (ret) {
-		dev_err(dev, "unable to reset device: %d\n", ret);
-		goto out_disable_clk;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "unable to reset device: %d\n", ret);
 
 	rate = clk_get_rate(clk);
 	if (!rate) {
-		pll_clk = devm_clk_get(dev, "pll");
-
-		if (IS_ERR(pll_clk)) {
-			ret = PTR_ERR(pll_clk);
-			goto out_disable_clk;
-		}
-
-		ret = clk_prepare_enable(pll_clk);
-		if (ret)
-			goto out_disable_clk;
+		pll_clk = devm_clk_get_enabled(dev, "pll");
+		if (IS_ERR(pll_clk))
+			return dev_err_probe(dev, PTR_ERR(pll_clk),
+					     "failed enable pll clk\n");
 
 		rate = clk_get_rate(pll_clk);
-		if (!rate) {
-			ret = -EINVAL;
-			goto out_disable_pll_clk;
-		}
+		if (!rate)
+			return dev_err_probe(dev, -EINVAL,
+					     "failed get pll clk rate\n");
 	}
 
-	master = spi_alloc_master(&pdev->dev, sizeof(*bs));
-	if (!master) {
-		ret = -ENOMEM;
-		goto out_disable_pll_clk;
-	}
+	host = spi_alloc_host(&pdev->dev, sizeof(*bs));
+	if (!host)
+		return dev_err_probe(dev, -ENOMEM, "alloc host no mem\n");
 
-	bs = spi_master_get_devdata(master);
+	bs = spi_controller_get_devdata(host);
 	bs->pdev = pdev;
 	bs->clk = clk;
 	bs->pll_clk = pll_clk;
@@ -796,17 +798,16 @@ static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 	bs->prepend_buf = devm_kzalloc(dev, HSSPI_BUFFER_LEN, GFP_KERNEL);
 	if (!bs->prepend_buf) {
 		ret = -ENOMEM;
-		goto out_put_master;
+		goto out_put_host;
 	}
 
 	mutex_init(&bs->bus_mutex);
 	mutex_init(&bs->msg_mutex);
 	init_completion(&bs->done);
 
-	master->mem_ops = &bcm63xx_hsspi_mem_ops;
-	master->dev.of_node = dev->of_node;
+	host->mem_ops = &bcm63xx_hsspi_mem_ops;
 	if (!dev->of_node)
-		master->bus_num = HSSPI_BUS_NUM;
+		host->bus_num = HSSPI_BUS_NUM;
 
 	of_property_read_u32(dev->of_node, "num-cs", &num_cs);
 	if (num_cs > 8) {
@@ -814,18 +815,18 @@ static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 			 num_cs);
 		num_cs = HSSPI_SPI_MAX_CS;
 	}
-	master->num_chipselect = num_cs;
-	master->setup = bcm63xx_hsspi_setup;
-	master->transfer_one_message = bcm63xx_hsspi_transfer_one;
-	master->max_transfer_size = bcm63xx_hsspi_max_message_size;
-	master->max_message_size = bcm63xx_hsspi_max_message_size;
+	host->num_chipselect = num_cs;
+	host->setup = bcm63xx_hsspi_setup;
+	host->transfer_one_message = bcm63xx_hsspi_transfer_one;
+	host->max_transfer_size = bcm63xx_hsspi_max_message_size;
+	host->max_message_size = bcm63xx_hsspi_max_message_size;
 
-	master->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH |
+	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH |
 			    SPI_RX_DUAL | SPI_TX_DUAL;
-	master->bits_per_word_mask = SPI_BPW_MASK(8);
-	master->auto_runtime_pm = true;
+	host->bits_per_word_mask = SPI_BPW_MASK(8);
+	host->auto_runtime_pm = true;
 
-	platform_set_drvdata(pdev, master);
+	platform_set_drvdata(pdev, host);
 
 	/* Initialize the hardware */
 	__raw_writel(0, bs->regs + HSSPI_INT_MASK_REG);
@@ -844,7 +845,7 @@ static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 				       pdev->name, bs);
 
 		if (ret)
-			goto out_put_master;
+			goto out_put_host;
 	}
 
 	pm_runtime_enable(&pdev->dev);
@@ -856,7 +857,7 @@ static int bcm63xx_hsspi_probe(struct platform_device *pdev)
 	}
 
 	/* register and we are done */
-	ret = devm_spi_register_master(dev, master);
+	ret = spi_register_controller(host);
 	if (ret)
 		goto out_sysgroup_disable;
 
@@ -868,35 +869,35 @@ out_sysgroup_disable:
 	sysfs_remove_group(&pdev->dev.kobj, &bcm63xx_hsspi_group);
 out_pm_disable:
 	pm_runtime_disable(&pdev->dev);
-out_put_master:
-	spi_master_put(master);
-out_disable_pll_clk:
-	clk_disable_unprepare(pll_clk);
-out_disable_clk:
-	clk_disable_unprepare(clk);
+out_put_host:
+	spi_controller_put(host);
 	return ret;
 }
 
 
 static void bcm63xx_hsspi_remove(struct platform_device *pdev)
 {
-	struct spi_master *master = platform_get_drvdata(pdev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(master);
+	struct spi_controller *host = platform_get_drvdata(pdev);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(host);
+
+	spi_controller_get(host);
+
+	spi_unregister_controller(host);
 
 	/* reset the hardware and block queue progress */
 	__raw_writel(0, bs->regs + HSSPI_INT_MASK_REG);
-	clk_disable_unprepare(bs->pll_clk);
-	clk_disable_unprepare(bs->clk);
 	sysfs_remove_group(&pdev->dev.kobj, &bcm63xx_hsspi_group);
+
+	spi_controller_put(host);
 }
 
 #ifdef CONFIG_PM_SLEEP
 static int bcm63xx_hsspi_suspend(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(master);
+	struct spi_controller *host = dev_get_drvdata(dev);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(host);
 
-	spi_master_suspend(master);
+	spi_controller_suspend(host);
 	clk_disable_unprepare(bs->pll_clk);
 	clk_disable_unprepare(bs->clk);
 
@@ -905,8 +906,8 @@ static int bcm63xx_hsspi_suspend(struct device *dev)
 
 static int bcm63xx_hsspi_resume(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct bcm63xx_hsspi *bs = spi_master_get_devdata(master);
+	struct spi_controller *host = dev_get_drvdata(dev);
+	struct bcm63xx_hsspi *bs = spi_controller_get_devdata(host);
 	int ret;
 
 	ret = clk_prepare_enable(bs->clk);
@@ -921,7 +922,7 @@ static int bcm63xx_hsspi_resume(struct device *dev)
 		}
 	}
 
-	spi_master_resume(master);
+	spi_controller_resume(host);
 
 	return 0;
 }
@@ -944,7 +945,7 @@ static struct platform_driver bcm63xx_hsspi_driver = {
 		.of_match_table = bcm63xx_hsspi_of_match,
 	},
 	.probe		= bcm63xx_hsspi_probe,
-	.remove_new	= bcm63xx_hsspi_remove,
+	.remove		= bcm63xx_hsspi_remove,
 };
 
 module_platform_driver(bcm63xx_hsspi_driver);

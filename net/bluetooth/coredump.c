@@ -5,7 +5,7 @@
 
 #include <linux/devcoredump.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
@@ -100,8 +100,7 @@ void hci_devcd_reset(struct hci_dev *hdev)
 /* Call with hci_dev_lock only. */
 static void hci_devcd_free(struct hci_dev *hdev)
 {
-	if (hdev->dump.head)
-		vfree(hdev->dump.head);
+	vfree(hdev->dump.head);
 
 	hci_devcd_reset(hdev);
 }
@@ -241,6 +240,26 @@ static void hci_devcd_handle_pkt_pattern(struct hci_dev *hdev,
 		bt_dev_dbg(hdev, "Failed to set pattern");
 }
 
+static void hci_devcd_dump(struct hci_dev *hdev)
+{
+	struct sk_buff *skb;
+	u32 size;
+
+	bt_dev_dbg(hdev, "state %d", hdev->dump.state);
+
+	size = hdev->dump.tail - hdev->dump.head;
+
+	/* Send a copy to monitor as a diagnostic packet */
+	skb = bt_skb_alloc(size, GFP_ATOMIC);
+	if (skb) {
+		skb_put_data(skb, hdev->dump.head, size);
+		hci_recv_diag(hdev, skb);
+	}
+
+	/* Emit a devcoredump with the available data */
+	dev_coredumpv(&hdev->dev, hdev->dump.head, size, GFP_KERNEL);
+}
+
 static void hci_devcd_handle_pkt_complete(struct hci_dev *hdev,
 					  struct sk_buff *skb)
 {
@@ -257,7 +276,7 @@ static void hci_devcd_handle_pkt_complete(struct hci_dev *hdev,
 	bt_dev_dbg(hdev, "complete with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 }
 
 static void hci_devcd_handle_pkt_abort(struct hci_dev *hdev,
@@ -276,8 +295,7 @@ static void hci_devcd_handle_pkt_abort(struct hci_dev *hdev,
 	bt_dev_dbg(hdev, "aborted with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	/* Emit a devcoredump with the available data */
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 }
 
 /* Bluetooth devcoredump state machine.
@@ -392,8 +410,7 @@ void hci_devcd_timeout(struct work_struct *work)
 	bt_dev_dbg(hdev, "timeout with size %u (expect %zu)", dump_size,
 		   hdev->dump.alloc_size);
 
-	/* Emit a devcoredump with the available data */
-	dev_coredumpv(&hdev->dev, hdev->dump.head, dump_size, GFP_KERNEL);
+	hci_devcd_dump(hdev);
 
 	hci_devcd_reset(hdev);
 

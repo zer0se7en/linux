@@ -7,30 +7,27 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <crypto/ecc_curve.h>
+#include <crypto/ecdh.h>
+#include <crypto/engine.h>
+#include <crypto/internal/ecc.h>
+#include <crypto/internal/kpp.h>
+#include <crypto/kpp.h>
+#include <crypto/rng.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
-#include <linux/crypto.h>
-#include <linux/delay.h>
+#include <linux/err.h>
 #include <linux/fips.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/irq.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
-#include <linux/slab.h>
-#include <linux/types.h>
-
-#include <crypto/ecc_curve.h>
-#include <crypto/ecdh.h>
-#include <crypto/engine.h>
-#include <crypto/kpp.h>
-#include <crypto/rng.h>
-
-#include <crypto/internal/ecc.h>
-#include <crypto/internal/kpp.h>
+#include <linux/string.h>
 
 #define DRV_NAME			"keembay-ocs-ecc"
 
@@ -95,13 +92,11 @@ struct ocs_ecc_dev {
 
 /**
  * struct ocs_ecc_ctx - Transformation context.
- * @engine_ctx:	 Crypto engine ctx.
  * @ecc_dev:	 The ECC driver associated with this context.
  * @curve:	 The elliptic curve used by this transformation.
  * @private_key: The private key.
  */
 struct ocs_ecc_ctx {
-	struct crypto_engine_ctx engine_ctx;
 	struct ocs_ecc_dev *ecc_dev;
 	const struct ecc_curve *curve;
 	u64 private_key[KMB_ECC_VLI_MAX_DIGITS];
@@ -235,12 +230,7 @@ static int kmb_ecc_point_mult(struct ocs_ecc_dev *ecc_dev,
 	int rc = 0;
 
 	/* Generate random nbytes for Simple and Differential SCA protection. */
-	rc = crypto_get_default_rng();
-	if (rc)
-		return rc;
-
-	rc = crypto_rng_get_bytes(crypto_default_rng, sca, nbytes);
-	crypto_put_default_rng();
+	rc = crypto_stdrng_get_bytes(sca, nbytes);
 	if (rc)
 		return rc;
 
@@ -514,14 +504,10 @@ static int kmb_ecc_gen_privkey(const struct ecc_curve *curve, u64 *privkey)
 	 * The maximum security strength identified by NIST SP800-57pt1r4 for
 	 * ECC is 256 (N >= 512).
 	 *
-	 * This condition is met by the default RNG because it selects a favored
-	 * DRBG with a security strength of 256.
+	 * This condition is met by stdrng because it selects a favored DRBG
+	 * with a security strength of 256.
 	 */
-	if (crypto_get_default_rng())
-		return -EFAULT;
-
-	rc = crypto_rng_get_bytes(crypto_default_rng, (u8 *)priv, nbytes);
-	crypto_put_default_rng();
+	rc = crypto_stdrng_get_bytes(priv, nbytes);
 	if (rc)
 		goto cleanup;
 
@@ -794,10 +780,6 @@ static int kmb_ecc_tctx_init(struct ocs_ecc_ctx *tctx, unsigned int curve_id)
 	if (!tctx->curve)
 		return -EOPNOTSUPP;
 
-	tctx->engine_ctx.op.prepare_request = NULL;
-	tctx->engine_ctx.op.do_one_request = kmb_ocs_ecc_do_one_request;
-	tctx->engine_ctx.op.unprepare_request = NULL;
-
 	return 0;
 }
 
@@ -830,36 +812,38 @@ static unsigned int kmb_ocs_ecdh_max_size(struct crypto_kpp *tfm)
 	return digits_to_bytes(tctx->curve->g.ndigits) * 2;
 }
 
-static struct kpp_alg ocs_ecdh_p256 = {
-	.set_secret = kmb_ocs_ecdh_set_secret,
-	.generate_public_key = kmb_ocs_ecdh_generate_public_key,
-	.compute_shared_secret = kmb_ocs_ecdh_compute_shared_secret,
-	.init = kmb_ocs_ecdh_nist_p256_init_tfm,
-	.exit = kmb_ocs_ecdh_exit_tfm,
-	.max_size = kmb_ocs_ecdh_max_size,
-	.base = {
+static struct kpp_engine_alg ocs_ecdh_p256 = {
+	.base.set_secret = kmb_ocs_ecdh_set_secret,
+	.base.generate_public_key = kmb_ocs_ecdh_generate_public_key,
+	.base.compute_shared_secret = kmb_ocs_ecdh_compute_shared_secret,
+	.base.init = kmb_ocs_ecdh_nist_p256_init_tfm,
+	.base.exit = kmb_ocs_ecdh_exit_tfm,
+	.base.max_size = kmb_ocs_ecdh_max_size,
+	.base.base = {
 		.cra_name = "ecdh-nist-p256",
 		.cra_driver_name = "ecdh-nist-p256-keembay-ocs",
 		.cra_priority = KMB_OCS_ECC_PRIORITY,
 		.cra_module = THIS_MODULE,
 		.cra_ctxsize = sizeof(struct ocs_ecc_ctx),
 	},
+	.op.do_one_request = kmb_ocs_ecc_do_one_request,
 };
 
-static struct kpp_alg ocs_ecdh_p384 = {
-	.set_secret = kmb_ocs_ecdh_set_secret,
-	.generate_public_key = kmb_ocs_ecdh_generate_public_key,
-	.compute_shared_secret = kmb_ocs_ecdh_compute_shared_secret,
-	.init = kmb_ocs_ecdh_nist_p384_init_tfm,
-	.exit = kmb_ocs_ecdh_exit_tfm,
-	.max_size = kmb_ocs_ecdh_max_size,
-	.base = {
+static struct kpp_engine_alg ocs_ecdh_p384 = {
+	.base.set_secret = kmb_ocs_ecdh_set_secret,
+	.base.generate_public_key = kmb_ocs_ecdh_generate_public_key,
+	.base.compute_shared_secret = kmb_ocs_ecdh_compute_shared_secret,
+	.base.init = kmb_ocs_ecdh_nist_p384_init_tfm,
+	.base.exit = kmb_ocs_ecdh_exit_tfm,
+	.base.max_size = kmb_ocs_ecdh_max_size,
+	.base.base = {
 		.cra_name = "ecdh-nist-p384",
 		.cra_driver_name = "ecdh-nist-p384-keembay-ocs",
 		.cra_priority = KMB_OCS_ECC_PRIORITY,
 		.cra_module = THIS_MODULE,
 		.cra_ctxsize = sizeof(struct ocs_ecc_ctx),
 	},
+	.op.do_one_request = kmb_ocs_ecc_do_one_request,
 };
 
 static irqreturn_t ocs_ecc_irq_handler(int irq, void *dev_id)
@@ -941,14 +925,14 @@ static int kmb_ocs_ecc_probe(struct platform_device *pdev)
 	}
 
 	/* Register the KPP algo. */
-	rc = crypto_register_kpp(&ocs_ecdh_p256);
+	rc = crypto_engine_register_kpp(&ocs_ecdh_p256);
 	if (rc) {
 		dev_err(dev,
 			"Could not register OCS algorithms with Crypto API\n");
 		goto cleanup;
 	}
 
-	rc = crypto_register_kpp(&ocs_ecdh_p384);
+	rc = crypto_engine_register_kpp(&ocs_ecdh_p384);
 	if (rc) {
 		dev_err(dev,
 			"Could not register OCS algorithms with Crypto API\n");
@@ -958,7 +942,7 @@ static int kmb_ocs_ecc_probe(struct platform_device *pdev)
 	return 0;
 
 ocs_ecdh_p384_error:
-	crypto_unregister_kpp(&ocs_ecdh_p256);
+	crypto_engine_unregister_kpp(&ocs_ecdh_p256);
 
 cleanup:
 	crypto_engine_exit(ecc_dev->engine);
@@ -971,22 +955,20 @@ list_del:
 	return rc;
 }
 
-static int kmb_ocs_ecc_remove(struct platform_device *pdev)
+static void kmb_ocs_ecc_remove(struct platform_device *pdev)
 {
 	struct ocs_ecc_dev *ecc_dev;
 
 	ecc_dev = platform_get_drvdata(pdev);
 
-	crypto_unregister_kpp(&ocs_ecdh_p384);
-	crypto_unregister_kpp(&ocs_ecdh_p256);
+	crypto_engine_unregister_kpp(&ocs_ecdh_p384);
+	crypto_engine_unregister_kpp(&ocs_ecdh_p256);
 
 	spin_lock(&ocs_ecc.lock);
 	list_del(&ecc_dev->list);
 	spin_unlock(&ocs_ecc.lock);
 
 	crypto_engine_exit(ecc_dev->engine);
-
-	return 0;
 }
 
 /* Device tree driver match. */

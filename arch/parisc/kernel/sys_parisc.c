@@ -24,6 +24,7 @@
 #include <linux/personality.h>
 #include <linux/random.h>
 #include <linux/compat.h>
+#include <linux/elf-randomize.h>
 
 /*
  * Construct an artificial page offset for the mapping based on the physical
@@ -49,9 +50,13 @@ static inline unsigned long COLOR_ALIGN(unsigned long addr,
 }
 
 
+#ifdef CONFIG_COMPAT
 #define STACK_SIZE_DEFAULT (USER_WIDE_MODE			\
 			? (1 << 30)	/* 1 GB */		\
 			: (CONFIG_STACK_MAX_DEFAULT_SIZE_MB*1024*1024))
+#else
+#define STACK_SIZE_DEFAULT (1 << 30)
+#endif
 
 unsigned long calc_max_stack_size(unsigned long stack_max)
 {
@@ -76,7 +81,7 @@ unsigned long calc_max_stack_size(unsigned long stack_max)
  * indicating that "current" should be used instead of a passed-in
  * value from the exec bprm as done with arch_pick_mmap_layout().
  */
-static unsigned long mmap_upper_limit(struct rlimit *rlim_stack)
+unsigned long mmap_upper_limit(const struct rlimit *rlim_stack)
 {
 	unsigned long stack_base;
 
@@ -103,7 +108,9 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 	struct vm_area_struct *vma, *prev;
 	unsigned long filp_pgoff;
 	int do_color_align;
-	struct vm_unmapped_area_info info;
+	struct vm_unmapped_area_info info = {
+		.length = len
+	};
 
 	if (unlikely(len > TASK_SIZE))
 		return -ENOMEM;
@@ -138,7 +145,6 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 			return addr;
 	}
 
-	info.length = len;
 	info.align_mask = do_color_align ? (PAGE_MASK & (SHM_COLOUR - 1)) : 0;
 	info.align_offset = shared_align_offset(filp_pgoff, pgoff);
 
@@ -159,14 +165,14 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 		 */
 	}
 
-	info.flags = 0;
-	info.low_limit = mm->mmap_legacy_base;
+	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_upper_limit(NULL);
 	return vm_unmapped_area(&info);
 }
 
 unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
-	unsigned long len, unsigned long pgoff, unsigned long flags)
+	unsigned long len, unsigned long pgoff, unsigned long flags,
+	vm_flags_t vm_flags)
 {
 	return arch_get_unmapped_area_common(filp,
 			addr, len, pgoff, flags, UP);
@@ -174,63 +180,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 
 unsigned long arch_get_unmapped_area_topdown(struct file *filp,
 	unsigned long addr, unsigned long len, unsigned long pgoff,
-	unsigned long flags)
+	unsigned long flags, vm_flags_t vm_flags)
 {
 	return arch_get_unmapped_area_common(filp,
 			addr, len, pgoff, flags, DOWN);
 }
-
-static int mmap_is_legacy(void)
-{
-	if (current->personality & ADDR_COMPAT_LAYOUT)
-		return 1;
-
-	/* parisc stack always grows up - so a unlimited stack should
-	 * not be an indicator to use the legacy memory layout.
-	 * if (rlimit(RLIMIT_STACK) == RLIM_INFINITY)
-	 *	return 1;
-	 */
-
-	return sysctl_legacy_va_layout;
-}
-
-static unsigned long mmap_rnd(void)
-{
-	unsigned long rnd = 0;
-
-	if (current->flags & PF_RANDOMIZE)
-		rnd = get_random_u32() & MMAP_RND_MASK;
-
-	return rnd << PAGE_SHIFT;
-}
-
-unsigned long arch_mmap_rnd(void)
-{
-	return (get_random_u32() & MMAP_RND_MASK) << PAGE_SHIFT;
-}
-
-static unsigned long mmap_legacy_base(void)
-{
-	return TASK_UNMAPPED_BASE + mmap_rnd();
-}
-
-/*
- * This function, called very early during the creation of a new
- * process VM image, sets up which VM layout function to use:
- */
-void arch_pick_mmap_layout(struct mm_struct *mm, struct rlimit *rlim_stack)
-{
-	mm->mmap_legacy_base = mmap_legacy_base();
-	mm->mmap_base = mmap_upper_limit(rlim_stack);
-
-	if (mmap_is_legacy()) {
-		mm->mmap_base = mm->mmap_legacy_base;
-		mm->get_unmapped_area = arch_get_unmapped_area;
-	} else {
-		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
-	}
-}
-
 
 asmlinkage unsigned long sys_mmap2(unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long fd,
@@ -266,7 +220,7 @@ asmlinkage long parisc_truncate64(const char __user * path,
 asmlinkage long parisc_ftruncate64(unsigned int fd,
 					unsigned int high, unsigned int low)
 {
-	return ksys_ftruncate(fd, (long)high << 32 | low);
+	return ksys_ftruncate(fd, (long)high << 32 | low, FTRUNCATE_LFS);
 }
 
 /* stubs for the benefit of the syscall_table since truncate64 and truncate 
@@ -277,7 +231,7 @@ asmlinkage long sys_truncate64(const char __user * path, unsigned long length)
 }
 asmlinkage long sys_ftruncate64(unsigned int fd, unsigned long length)
 {
-	return ksys_ftruncate(fd, length);
+	return ksys_ftruncate(fd, length, FTRUNCATE_LFS);
 }
 asmlinkage long sys_fcntl64(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
@@ -339,7 +293,7 @@ asmlinkage long parisc_fallocate(int fd, int mode, u32 offhi, u32 offlo,
 			      ((u64)lenhi << 32) | lenlo);
 }
 
-long parisc_personality(unsigned long personality)
+asmlinkage long parisc_personality(unsigned long personality)
 {
 	long err;
 

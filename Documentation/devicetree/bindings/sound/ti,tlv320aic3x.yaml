@@ -46,6 +46,7 @@ maintainers:
 properties:
   compatible:
     enum:
+      - ti,tlv320aic23
       - ti,tlv320aic3x
       - ti,tlv320aic33
       - ti,tlv320aic3007
@@ -61,6 +62,7 @@ properties:
       GPIO specification for the active low RESET input.
 
   gpio-reset:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
     maxItems: 1
     description:
       Deprecated, please use reset-gpios instead.

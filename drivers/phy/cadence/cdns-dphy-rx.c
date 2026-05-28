@@ -7,10 +7,12 @@
 #include <linux/bitops.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/phy/phy-mipi-dphy.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/sys_soc.h>
 
 #define DPHY_PMA_CMN(reg)		(reg)
@@ -264,7 +266,7 @@ static int cdns_dphy_rx_probe(struct platform_device *pdev)
 		return PTR_ERR(provider);
 	}
 
-	return 0;
+	return devm_pm_runtime_enable(dev);
 }
 
 static const struct of_device_id cdns_dphy_rx_of_match[] = {

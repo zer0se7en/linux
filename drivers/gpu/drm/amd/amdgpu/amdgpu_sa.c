@@ -81,7 +81,7 @@ int amdgpu_sa_bo_new(struct amdgpu_sa_manager *sa_manager,
 		     unsigned int size)
 {
 	struct drm_suballoc *sa = drm_suballoc_new(&sa_manager->base, size,
-						   GFP_KERNEL, true, 0);
+						   GFP_KERNEL, false, 0);
 
 	if (IS_ERR(sa)) {
 		*sa_bo = NULL;
@@ -93,8 +93,7 @@ int amdgpu_sa_bo_new(struct amdgpu_sa_manager *sa_manager,
 	return 0;
 }
 
-void amdgpu_sa_bo_free(struct amdgpu_device *adev, struct drm_suballoc **sa_bo,
-		       struct dma_fence *fence)
+void amdgpu_sa_bo_free(struct drm_suballoc **sa_bo, struct dma_fence *fence)
 {
 	if (sa_bo == NULL || *sa_bo == NULL) {
 		return;

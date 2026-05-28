@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include "netlink.h"
 #include "common.h"
+#include "netlink.h"
 
 struct pause_req_info {
 	struct ethnl_req_info		base;
@@ -28,6 +28,7 @@ const struct nla_policy ethnl_pause_get_policy[] = {
 };
 
 static int pause_parse_request(struct ethnl_req_info *req_base,
+			       const struct genl_info *info,
 			       struct nlattr **tb,
 			       struct netlink_ext_ack *extack)
 {
@@ -51,10 +52,9 @@ static int pause_parse_request(struct ethnl_req_info *req_base,
 
 static int pause_prepare_data(const struct ethnl_req_info *req_base,
 			      struct ethnl_reply_data *reply_base,
-			      struct genl_info *info)
+			      const struct genl_info *info)
 {
 	const struct pause_req_info *req_info = PAUSE_REQINFO(req_base);
-	struct netlink_ext_ack *extack = info ? info->extack : NULL;
 	struct pause_reply_data *data = PAUSE_REPDATA(reply_base);
 	enum ethtool_mac_stats_src src = req_info->src;
 	struct net_device *dev = reply_base->dev;
@@ -74,7 +74,7 @@ static int pause_prepare_data(const struct ethnl_req_info *req_base,
 	if ((src == ETHTOOL_MAC_STATS_SRC_EMAC ||
 	     src == ETHTOOL_MAC_STATS_SRC_PMAC) &&
 	    !__ethtool_dev_mm_supported(dev)) {
-		NL_SET_ERR_MSG_MOD(extack,
+		NL_SET_ERR_MSG_MOD(info->extack,
 				   "Device does not support MAC merge layer");
 		ethnl_ops_complete(dev);
 		return -EOPNOTSUPP;
@@ -131,7 +131,9 @@ static int pause_put_stats(struct sk_buff *skb,
 	if (ethtool_put_stat(skb, pause_stats->tx_pause_frames,
 			     ETHTOOL_A_PAUSE_STAT_TX_FRAMES, pad) ||
 	    ethtool_put_stat(skb, pause_stats->rx_pause_frames,
-			     ETHTOOL_A_PAUSE_STAT_RX_FRAMES, pad))
+			     ETHTOOL_A_PAUSE_STAT_RX_FRAMES, pad) ||
+	    ethtool_put_stat(skb, pause_stats->tx_pause_storm_events,
+			     ETHTOOL_A_PAUSE_STAT_TX_PAUSE_STORM_EVENTS, pad))
 		goto err_cancel;
 
 	nla_nest_end(skb, nest);
@@ -169,6 +171,7 @@ const struct nla_policy ethnl_pause_set_policy[] = {
 	[ETHTOOL_A_PAUSE_AUTONEG]		= { .type = NLA_U8 },
 	[ETHTOOL_A_PAUSE_RX]			= { .type = NLA_U8 },
 	[ETHTOOL_A_PAUSE_TX]			= { .type = NLA_U8 },
+	[ETHTOOL_A_PAUSE_STATS_SRC]		= { .type = NLA_REJECT },
 };
 
 static int

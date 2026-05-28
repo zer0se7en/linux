@@ -125,7 +125,7 @@ struct pci_controller *pcibios_alloc_controller(struct device_node *dev)
 {
 	struct pci_controller *phb;
 
-	phb = zalloc_maybe_bootmem(sizeof(struct pci_controller), GFP_KERNEL);
+	phb = kzalloc_obj(struct pci_controller);
 	if (phb == NULL)
 		return NULL;
 
@@ -432,7 +432,7 @@ static int pci_read_irq_line(struct pci_dev *pci_dev)
 	struct pci_intx_virq *vi, *vitmp;
 
 	/* Preallocate vi as rewind is complex if this fails after mapping */
-	vi = kzalloc(sizeof(struct pci_intx_virq), GFP_KERNEL);
+	vi = kzalloc_obj(struct pci_intx_virq);
 	if (!vi)
 		return -1;
 
@@ -517,12 +517,11 @@ int pci_iobar_pfn(struct pci_dev *pdev, int bar, struct vm_area_struct *vma)
 }
 
 /*
- * This one is used by /dev/mem and fbdev who have no clue about the
+ * This one is used by /dev/mem and video who have no clue about the
  * PCI device, it tries to find the PCI device first and calls the
  * above routine
  */
-pgprot_t pci_phys_mem_access_prot(struct file *file,
-				  unsigned long pfn,
+pgprot_t pci_phys_mem_access_prot(unsigned long pfn,
 				  unsigned long size,
 				  pgprot_t prot)
 {
@@ -1133,7 +1132,9 @@ static int skip_isa_ioresource_align(struct pci_dev *dev)
  * which might have be mirrored at 0x0100-0x03ff..
  */
 resource_size_t pcibios_align_resource(void *data, const struct resource *res,
-				resource_size_t size, resource_size_t align)
+				       const struct resource *empty_res,
+				       resource_size_t size,
+				       resource_size_t align)
 {
 	struct pci_dev *dev = data;
 	resource_size_t start = res->start;
@@ -1143,6 +1144,8 @@ resource_size_t pcibios_align_resource(void *data, const struct resource *res,
 			return start;
 		if (start & 0x300)
 			start = (start + 0x3ff) & ~0x3ff;
+	} else if (res->flags & IORESOURCE_MEM) {
+		start = pci_align_resource(dev, res, empty_res, size, align);
 	}
 
 	return start;
@@ -1369,7 +1372,7 @@ static void __init pcibios_reserve_legacy_regions(struct pci_bus *bus)
 	if (!(hose->io_resource.flags & IORESOURCE_IO))
 		goto no_io;
 	offset = (unsigned long)hose->io_base_virt - _IO_BASE;
-	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_obj(struct resource);
 	BUG_ON(res == NULL);
 	res->name = "Legacy IO";
 	res->flags = IORESOURCE_IO;
@@ -1397,7 +1400,7 @@ static void __init pcibios_reserve_legacy_regions(struct pci_bus *bus)
 	}
 	if (i >= 3)
 		return;
-	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_obj(struct resource);
 	BUG_ON(res == NULL);
 	res->name = "Legacy VGA memory";
 	res->flags = IORESOURCE_MEM;

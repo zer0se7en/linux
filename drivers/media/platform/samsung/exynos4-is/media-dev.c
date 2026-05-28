@@ -17,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
-#include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
@@ -374,7 +373,7 @@ static struct exynos_media_pipeline *fimc_md_pipeline_create(
 {
 	struct fimc_pipeline *p;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return NULL;
 
@@ -401,7 +400,7 @@ static int fimc_md_parse_one_endpoint(struct fimc_md *fmd,
 	int index = fmd->num_sensors;
 	struct fimc_source_info *pd = &fmd->sensor[index].pdata;
 	struct device_node *rem, *np;
-	struct v4l2_async_subdev *asd;
+	struct v4l2_async_connection *asd;
 	struct v4l2_fwnode_endpoint endpoint = { .bus_type = 0 };
 	int ret;
 
@@ -466,7 +465,7 @@ static int fimc_md_parse_one_endpoint(struct fimc_md *fmd,
 
 	asd = v4l2_async_nf_add_fwnode_remote(&fmd->subdev_notifier,
 					      of_fwnode_handle(ep),
-					      struct v4l2_async_subdev);
+					      struct v4l2_async_connection);
 
 	of_node_put(ep);
 
@@ -483,15 +482,12 @@ static int fimc_md_parse_one_endpoint(struct fimc_md *fmd,
 static int fimc_md_parse_port_node(struct fimc_md *fmd,
 				   struct device_node *port)
 {
-	struct device_node *ep;
 	int ret;
 
-	for_each_child_of_node(port, ep) {
+	for_each_child_of_node_scoped(port, ep) {
 		ret = fimc_md_parse_one_endpoint(fmd, ep);
-		if (ret < 0) {
-			of_node_put(ep);
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -502,7 +498,6 @@ static int fimc_md_register_sensor_entities(struct fimc_md *fmd)
 {
 	struct device_node *parent = fmd->pdev->dev.of_node;
 	struct device_node *ports = NULL;
-	struct device_node *node;
 	int ret;
 
 	/*
@@ -519,7 +514,7 @@ static int fimc_md_register_sensor_entities(struct fimc_md *fmd)
 	fmd->num_sensors = 0;
 
 	/* Attach sensors linked to MIPI CSI-2 receivers */
-	for_each_available_child_of_node(parent, node) {
+	for_each_available_child_of_node_scoped(parent, node) {
 		struct device_node *port;
 
 		if (!of_node_name_eq(node, "csis"))
@@ -531,10 +526,8 @@ static int fimc_md_register_sensor_entities(struct fimc_md *fmd)
 
 		ret = fimc_md_parse_port_node(fmd, port);
 		of_node_put(port);
-		if (ret < 0) {
-			of_node_put(node);
+		if (ret < 0)
 			goto cleanup;
-		}
 	}
 
 	/* Attach sensors listed in the parallel-ports node */
@@ -542,12 +535,10 @@ static int fimc_md_register_sensor_entities(struct fimc_md *fmd)
 	if (!ports)
 		goto rpm_put;
 
-	for_each_child_of_node(ports, node) {
+	for_each_child_of_node_scoped(ports, node) {
 		ret = fimc_md_parse_port_node(fmd, node);
-		if (ret < 0) {
-			of_node_put(node);
+		if (ret < 0)
 			goto cleanup;
-		}
 	}
 	of_node_put(ports);
 
@@ -737,10 +728,9 @@ dev_unlock:
 static int fimc_md_register_platform_entities(struct fimc_md *fmd,
 					      struct device_node *parent)
 {
-	struct device_node *node;
 	int ret = 0;
 
-	for_each_available_child_of_node(parent, node) {
+	for_each_available_child_of_node_scoped(parent, node) {
 		struct platform_device *pdev;
 		int plat_entity = -1;
 
@@ -763,10 +753,8 @@ static int fimc_md_register_platform_entities(struct fimc_md *fmd,
 			ret = fimc_md_register_platform_entity(fmd, pdev,
 							plat_entity);
 		put_device(&pdev->dev);
-		if (ret < 0) {
-			of_node_put(node);
+		if (ret < 0)
 			break;
-		}
 	}
 
 	return ret;
@@ -1345,8 +1333,8 @@ static int fimc_md_register_clk_provider(struct fimc_md *fmd)
 
 		cp->clks[i] = clk_register(NULL, &camclk->hw);
 		if (IS_ERR(cp->clks[i])) {
-			dev_err(dev, "failed to register clock: %s (%ld)\n",
-					init.name, PTR_ERR(cp->clks[i]));
+			dev_err(dev, "failed to register clock: %s (%pe)\n",
+				init.name, cp->clks[i]);
 			ret = PTR_ERR(cp->clks[i]);
 			goto err;
 		}
@@ -1372,7 +1360,7 @@ err:
 
 static int subdev_notifier_bound(struct v4l2_async_notifier *notifier,
 				 struct v4l2_subdev *subdev,
-				 struct v4l2_async_subdev *asd)
+				 struct v4l2_async_connection *asd)
 {
 	struct fimc_md *fmd = notifier_to_fimc_md(notifier);
 	struct fimc_sensor_info *si = NULL;
@@ -1411,12 +1399,14 @@ static int subdev_notifier_complete(struct v4l2_async_notifier *notifier)
 	mutex_lock(&fmd->media_dev.graph_mutex);
 
 	ret = fimc_md_create_links(fmd);
-	if (ret < 0)
-		goto unlock;
+	if (ret < 0) {
+		mutex_unlock(&fmd->media_dev.graph_mutex);
+		return ret;
+	}
+
+	mutex_unlock(&fmd->media_dev.graph_mutex);
 
 	ret = v4l2_device_register_subdev_nodes(&fmd->v4l2_dev);
-unlock:
-	mutex_unlock(&fmd->media_dev.graph_mutex);
 	if (ret < 0)
 		return ret;
 
@@ -1479,7 +1469,7 @@ static int fimc_md_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, fmd);
 
-	v4l2_async_nf_init(&fmd->subdev_notifier);
+	v4l2_async_nf_init(&fmd->subdev_notifier, &fmd->v4l2_dev);
 
 	ret = fimc_md_register_platform_entities(fmd, dev->of_node);
 	if (ret)
@@ -1507,8 +1497,7 @@ static int fimc_md_probe(struct platform_device *pdev)
 		fmd->subdev_notifier.ops = &subdev_notifier_ops;
 		fmd->num_sensors = 0;
 
-		ret = v4l2_async_nf_register(&fmd->v4l2_dev,
-					     &fmd->subdev_notifier);
+		ret = v4l2_async_nf_register(&fmd->subdev_notifier);
 		if (ret)
 			goto err_clk_p;
 	}
@@ -1566,7 +1555,7 @@ MODULE_DEVICE_TABLE(of, fimc_md_of_match);
 
 static struct platform_driver fimc_md_driver = {
 	.probe		= fimc_md_probe,
-	.remove_new	= fimc_md_remove,
+	.remove		= fimc_md_remove,
 	.driver = {
 		.of_match_table = of_match_ptr(fimc_md_of_match),
 		.name		= "s5p-fimc-md",

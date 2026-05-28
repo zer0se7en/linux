@@ -18,9 +18,8 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/dmaengine.h>
-#include <linux/of_address.h>
+#include <linux/of.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/libata.h>
@@ -851,7 +850,7 @@ static int sata_dwc_port_start(struct ata_port *ap)
 	}
 
 	/* Allocate Port Struct */
-	hsdevp = kzalloc(sizeof(*hsdevp), GFP_KERNEL);
+	hsdevp = kzalloc_obj(*hsdevp);
 	if (!hsdevp) {
 		err = -ENOMEM;
 		goto CLEANUP;
@@ -1098,7 +1097,7 @@ static struct ata_port_operations sata_dwc_ops = {
 	.inherits		= &ata_sff_port_ops,
 
 	.error_handler		= sata_dwc_error_handler,
-	.hardreset		= sata_dwc_hardreset,
+	.reset.hardreset	= sata_dwc_hardreset,
 
 	.qc_issue		= sata_dwc_qc_issue,
 
@@ -1211,7 +1210,7 @@ error_out:
 	return err;
 }
 
-static int sata_dwc_remove(struct platform_device *ofdev)
+static void sata_dwc_remove(struct platform_device *ofdev)
 {
 	struct device *dev = &ofdev->dev;
 	struct ata_host *host = dev_get_drvdata(dev);
@@ -1227,7 +1226,6 @@ static int sata_dwc_remove(struct platform_device *ofdev)
 #endif
 
 	dev_dbg(dev, "done\n");
-	return 0;
 }
 
 static const struct of_device_id sata_dwc_match[] = {

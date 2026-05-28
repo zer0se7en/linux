@@ -9,9 +9,12 @@
 #include <linux/list.h>
 #include <linux/rbtree.h>
 #include <stdio.h>
+#include <errno.h>
+#include "addr_location.h"
 #include "path.h"
 #include "symbol_conf.h"
 #include "spark.h"
+#include "util.h"
 
 #ifdef HAVE_LIBELF_SUPPORT
 #include <libelf.h>
@@ -42,8 +45,7 @@ Elf_Scn *elf_section_by_name(Elf *elf, GElf_Ehdr *ep,
 
 /**
  * A symtab entry. When allocated this may be preceded by an annotation (see
- * symbol__annotation), a browser_index (see symbol__browser_index) and rb_node
- * to sort by name (see struct symbol_name_rb_node).
+ * symbol__annotation) and/or a browser_index (see symbol__browser_index).
  */
 struct symbol {
 	struct rb_node	rb_node;
@@ -94,13 +96,11 @@ static inline size_t symbol__size(const struct symbol *sym)
 struct strlist;
 struct intlist;
 
-struct symbol_name_rb_node {
-	struct rb_node	rb_node;
-	struct symbol	sym;
-};
-
 static inline int __symbol__join_symfs(char *bf, size_t size, const char *path)
 {
+	if (symbol_conf.symfs_layout_flat)
+		return path__join(bf, size, symbol_conf.symfs, perf_basename(path));
+
 	return path__join(bf, size, symbol_conf.symfs, path);
 }
 
@@ -120,22 +120,6 @@ struct ref_reloc_sym {
 	u64		unrelocated_addr;
 };
 
-struct addr_location {
-	struct thread *thread;
-	struct maps   *maps;
-	struct map    *map;
-	struct symbol *sym;
-	const char    *srcline;
-	u64	      addr;
-	char	      level;
-	u8	      filtered;
-	u8	      cpumode;
-	s32	      cpu;
-	s32	      socket;
-};
-
-void addr_location__put(struct addr_location *al);
-
 int dso__load(struct dso *dso, struct map *map);
 int dso__load_vmlinux(struct dso *dso, struct map *map,
 		      const char *vmlinux, bool vmlinux_allocated);
@@ -151,9 +135,9 @@ void dso__delete_symbol(struct dso *dso,
 
 struct symbol *dso__find_symbol(struct dso *dso, u64 addr);
 struct symbol *dso__find_symbol_nocache(struct dso *dso, u64 addr);
-struct symbol *dso__find_symbol_by_name(struct dso *dso, const char *name);
 
-struct symbol *symbol__next_by_name(struct symbol *sym);
+struct symbol *dso__next_symbol_by_name(struct dso *dso, size_t *idx);
+struct symbol *dso__find_symbol_by_name(struct dso *dso, const char *name, size_t *idx);
 
 struct symbol *dso__first_symbol(struct dso *dso);
 struct symbol *dso__last_symbol(struct dso *dso);
@@ -190,6 +174,11 @@ size_t symbol__fprintf_symname(const struct symbol *sym, FILE *fp);
 size_t symbol__fprintf(struct symbol *sym, FILE *fp);
 bool symbol__restricted_filename(const char *filename,
 				 const char *restricted_filename);
+
+#define SYMFS_HELP "setup root directory which contains debug files:\n" \
+	"\t\t\t\t" "directory:\tLook for files with symbols relative to this directory.\n" \
+	"\t\t\t\t" "layout:   \tLayout of files, 'hierarchy' matches full path (default), 'flat' only matches base name.\n"
+
 int symbol__config_symfs(const struct option *opt __maybe_unused,
 			 const char *dir, int unset __maybe_unused);
 
@@ -210,7 +199,6 @@ void __symbols__insert(struct rb_root_cached *symbols, struct symbol *sym,
 void symbols__insert(struct rb_root_cached *symbols, struct symbol *sym);
 void symbols__fixup_duplicate(struct rb_root_cached *symbols);
 void symbols__fixup_end(struct rb_root_cached *symbols, bool is_kallsyms);
-void maps__fixup_end(struct maps *maps);
 
 typedef int (*mapfn_t)(u64 start, u64 len, u64 pgoff, void *data);
 int file__read_maps(int fd, bool exe, mapfn_t mapfn, void *data,
@@ -239,7 +227,6 @@ int setup_intlist(struct intlist **list, const char *list_str,
 		  const char *list_name);
 
 #ifdef HAVE_LIBELF_SUPPORT
-bool elf__needs_adjust_symbols(GElf_Ehdr ehdr);
 void arch__sym_update(struct symbol *s, GElf_Sym *sym);
 #endif
 
@@ -289,18 +276,6 @@ enum {
 	SDT_NOTE_IDX_BASE,
 	SDT_NOTE_IDX_REFCTR,
 };
-
-struct mem_info *mem_info__new(void);
-struct mem_info *mem_info__get(struct mem_info *mi);
-void   mem_info__put(struct mem_info *mi);
-
-static inline void __mem_info__zput(struct mem_info **mi)
-{
-	mem_info__put(*mi);
-	*mi = NULL;
-}
-
-#define mem_info__zput(mi) __mem_info__zput(&mi)
 
 int symbol__validate_sym_arguments(void);
 

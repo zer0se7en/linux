@@ -227,7 +227,7 @@ static int hidg_plat_driver_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -237,7 +237,7 @@ static int hidg_plat_driver_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int hidg_plat_driver_remove(struct platform_device *pdev)
+static void hidg_plat_driver_remove(struct platform_device *pdev)
 {
 	struct hidg_func_node *e, *n;
 
@@ -245,8 +245,6 @@ static int hidg_plat_driver_remove(struct platform_device *pdev)
 		list_del(&e->node);
 		kfree(e);
 	}
-
-	return 0;
 }
 
 

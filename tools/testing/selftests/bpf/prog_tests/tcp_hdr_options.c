@@ -347,7 +347,7 @@ static void syncookie_estab(void)
 	exp_active_estab_in.max_delack_ms = 22;
 
 	exp_passive_hdr_stg.syncookie = true;
-	exp_active_hdr_stg.resend_syn = true,
+	exp_active_hdr_stg.resend_syn = true;
 
 	prepare_out();
 
@@ -506,6 +506,10 @@ static void misc(void)
 	ASSERT_EQ(misc_skel->bss->nr_fin, 1, "unexpected nr_fin");
 
 	ASSERT_EQ(misc_skel->bss->nr_hwtstamp, 0, "nr_hwtstamp");
+
+	ASSERT_TRUE(misc_skel->bss->nodelay_est_ok, "nodelay_est_ok");
+	ASSERT_TRUE(misc_skel->bss->nodelay_hdr_len_reject, "nodelay_hdr_len_reject");
+	ASSERT_TRUE(misc_skel->bss->nodelay_write_hdr_reject, "nodelay_write_hdr_reject");
 
 check_linum:
 	ASSERT_FALSE(check_error_linum(&sk_fds), "check_error_linum");

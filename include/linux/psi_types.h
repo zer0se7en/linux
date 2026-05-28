@@ -84,11 +84,9 @@ enum psi_aggregators {
 struct psi_group_cpu {
 	/* 1st cacheline updated by the scheduler */
 
-	/* Aggregator needs to know of concurrent changes */
-	seqcount_t seq ____cacheline_aligned_in_smp;
-
 	/* States of the tasks belonging to this group */
-	unsigned int tasks[NR_PSI_TASK_COUNTS];
+	unsigned int tasks[NR_PSI_TASK_COUNTS]
+			____cacheline_aligned_in_smp;
 
 	/* Aggregate pressure state derived from the tasks */
 	u32 state_mask;
@@ -136,6 +134,9 @@ struct psi_trigger {
 
 	/* Wait queue for polling */
 	wait_queue_head_t event_wait;
+
+	/* Kernfs file for cgroup triggers */
+	struct kernfs_open_file *of;
 
 	/* Pending event flag */
 	int event;

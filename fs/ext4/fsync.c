@@ -28,6 +28,7 @@
 #include <linux/sched.h>
 #include <linux/writeback.h>
 #include <linux/blkdev.h>
+#include <linux/buffer_head.h>
 
 #include "ext4.h"
 #include "ext4_jbd2.h"
@@ -67,7 +68,7 @@ static int ext4_sync_parent(struct inode *inode)
 		 * through ext4_evict_inode()) and so we are safe to flush
 		 * metadata blocks and the inode.
 		 */
-		ret = sync_mapping_buffers(inode->i_mapping);
+		ret = mmb_sync(&EXT4_I(inode)->i_metadata_bhs);
 		if (ret)
 			break;
 		ret = sync_inode_metadata(inode, 1);
@@ -78,23 +79,28 @@ static int ext4_sync_parent(struct inode *inode)
 	return ret;
 }
 
-static int ext4_fsync_nojournal(struct inode *inode, bool datasync,
-				bool *needs_barrier)
+static int ext4_fsync_nojournal(struct file *file, loff_t start, loff_t end,
+				int datasync, bool *needs_barrier)
 {
-	int ret, err;
+	struct inode *inode = file->f_inode;
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_ALL,
+		.nr_to_write = 0,
+	};
+	int ret;
 
-	ret = sync_mapping_buffers(inode->i_mapping);
-	if (!(inode->i_state & I_DIRTY_ALL))
+	ret = mmb_fsync_noflush(file, &EXT4_I(inode)->i_metadata_bhs,
+				start, end, datasync);
+	if (ret)
 		return ret;
-	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
+
+	/* Force writeout of inode table buffer to disk */
+	ret = ext4_write_inode(inode, &wbc);
+	if (ret)
 		return ret;
 
-	err = sync_inode_metadata(inode, 1);
-	if (!ret)
-		ret = err;
+	ret = ext4_sync_parent(inode);
 
-	if (!ret)
-		ret = ext4_sync_parent(inode);
 	if (test_opt(inode->i_sb, BARRIER))
 		*needs_barrier = true;
 
@@ -138,20 +144,23 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	int ret = 0, err;
 	bool needs_barrier = false;
 	struct inode *inode = file->f_mapping->host;
-	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 
-	if (unlikely(ext4_forced_shutdown(sbi)))
-		return -EIO;
+	ret = ext4_emergency_state(inode->i_sb);
+	if (unlikely(ret))
+		return ret;
 
 	ASSERT(ext4_journal_current_handle() == NULL);
 
 	trace_ext4_sync_file_enter(file, datasync);
 
-	if (sb_rdonly(inode->i_sb)) {
-		/* Make sure that we read updated s_mount_flags value */
-		smp_rmb();
-		if (ext4_test_mount_flag(inode->i_sb, EXT4_MF_FS_ABORTED))
-			ret = -EROFS;
+	if (sb_rdonly(inode->i_sb))
+		goto out;
+
+	if (!EXT4_SB(inode->i_sb)->s_journal) {
+		ret = ext4_fsync_nojournal(file, start, end, datasync,
+					   &needs_barrier);
+		if (needs_barrier)
+			goto issue_flush;
 		goto out;
 	}
 
@@ -164,11 +173,9 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 *  Metadata is in the journal, we wait for proper transaction to
 	 *  commit here.
 	 */
-	if (!sbi->s_journal)
-		ret = ext4_fsync_nojournal(inode, datasync, &needs_barrier);
-	else
-		ret = ext4_fsync_journal(inode, datasync, &needs_barrier);
+	ret = ext4_fsync_journal(inode, datasync, &needs_barrier);
 
+issue_flush:
 	if (needs_barrier) {
 		err = blkdev_issue_flush(inode->i_sb->s_bdev);
 		if (!ret)

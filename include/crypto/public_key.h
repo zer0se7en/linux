@@ -10,6 +10,7 @@
 #ifndef _LINUX_PUBLIC_KEY_H
 #define _LINUX_PUBLIC_KEY_H
 
+#include <linux/errno.h>
 #include <linux/keyctl.h>
 #include <linux/oid_registry.h>
 
@@ -42,14 +43,14 @@ extern void public_key_free(struct public_key *key);
 struct public_key_signature {
 	struct asymmetric_key_id *auth_ids[3];
 	u8 *s;			/* Signature */
-	u8 *digest;
+	u8 *m;			/* Message data to pass to verifier */
 	u32 s_size;		/* Number of bytes in signature */
-	u32 digest_size;	/* Number of bytes in digest */
+	u32 m_size;		/* Number of bytes in ->m */
+	bool m_free;		/* T if ->m needs freeing */
+	bool algo_takes_data;	/* T if public key algo operates on data, not a hash */
 	const char *pkey_algo;
 	const char *hash_algo;
 	const char *encoding;
-	const void *data;
-	unsigned int data_size;
 };
 
 extern void public_key_signature_free(struct public_key_signature *sig);
@@ -80,6 +81,10 @@ extern int restrict_link_by_ca(struct key *dest_keyring,
 			       const struct key_type *type,
 			       const union key_payload *payload,
 			       struct key *trust_keyring);
+int restrict_link_by_digsig(struct key *dest_keyring,
+			    const struct key_type *type,
+			    const union key_payload *payload,
+			    struct key *trust_keyring);
 #else
 static inline int restrict_link_by_ca(struct key *dest_keyring,
 				      const struct key_type *type,
@@ -88,14 +93,19 @@ static inline int restrict_link_by_ca(struct key *dest_keyring,
 {
 	return 0;
 }
+
+static inline int restrict_link_by_digsig(struct key *dest_keyring,
+					  const struct key_type *type,
+					  const union key_payload *payload,
+					  struct key *trust_keyring)
+{
+	return 0;
+}
 #endif
 
 extern int query_asymmetric_key(const struct kernel_pkey_params *,
 				struct kernel_pkey_query *);
 
-extern int encrypt_blob(struct kernel_pkey_params *, const void *, void *);
-extern int decrypt_blob(struct kernel_pkey_params *, const void *, void *);
-extern int create_signature(struct kernel_pkey_params *, const void *, void *);
 extern int verify_signature(const struct key *,
 			    const struct public_key_signature *);
 

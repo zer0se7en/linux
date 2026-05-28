@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -424,10 +423,10 @@ MODULE_DEVICE_TABLE(of, sun6i_csi_of_match);
 
 static struct platform_driver sun6i_csi_platform_driver = {
 	.probe	= sun6i_csi_probe,
-	.remove_new = sun6i_csi_remove,
+	.remove = sun6i_csi_remove,
 	.driver	= {
 		.name		= SUN6I_CSI_NAME,
-		.of_match_table	= of_match_ptr(sun6i_csi_of_match),
+		.of_match_table	= sun6i_csi_of_match,
 		.pm		= &sun6i_csi_pm_ops,
 	},
 };

@@ -11,6 +11,7 @@
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include "sc7180.dtsi"
+#include "sc7180-firmware-tfa.dtsi"
 #include "pm6150.dtsi"
 #include "pm6150l.dtsi"
 
@@ -38,6 +39,7 @@
  *
  */
 
+/delete-node/ &gpu_zap_shader;
 /delete-node/ &hyp_mem;
 /delete-node/ &xbl_mem;
 /delete-node/ &aop_mem;
@@ -295,7 +297,11 @@
 	};
 };
 
-&dsi0 {
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
 	status = "okay";
 
 	vdda-supply = <&vreg_l3c_1p2>;
@@ -314,32 +320,20 @@
 
 		port {
 			panel0_in: endpoint {
-				remote-endpoint = <&dsi0_out>;
-			};
-		};
-	};
-
-	ports {
-		port@1 {
-			endpoint {
-				remote-endpoint = <&panel0_in>;
-				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&mdss_dsi0_out>;
 			};
 		};
 	};
 };
 
-&dsi_phy {
+&mdss_dsi0_out {
+	remote-endpoint = <&panel0_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
 	status = "okay";
 	vdds-supply = <&vreg_l4a_0p8>;
-};
-
-&mdp {
-	status = "okay";
-};
-
-&mdss {
-	status = "okay";
 };
 
 &qfprom {
@@ -391,6 +385,11 @@
 
 	qcom,halt-regs = <&tcsr_regs_1 0x3000 0x5000 0x4000>;
 	qcom,spare-regs = <&tcsr_regs_2 0xb3e4>;
+};
+
+&scm {
+	/* TF-A firmware maps memory cached so mark dma-coherent to match. */
+	dma-coherent;
 };
 
 &sdhc_1 {

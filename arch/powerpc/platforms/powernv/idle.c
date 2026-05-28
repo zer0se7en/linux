@@ -18,7 +18,7 @@
 #include <asm/opal.h>
 #include <asm/cputhreads.h>
 #include <asm/cpuidle.h>
-#include <asm/code-patching.h>
+#include <asm/text-patching.h>
 #include <asm/smp.h>
 #include <asm/runlatch.h>
 #include <asm/dbell.h>
@@ -246,9 +246,9 @@ static inline void atomic_lock_thread_idle(void)
 {
 	int cpu = raw_smp_processor_id();
 	int first = cpu_first_thread_sibling(cpu);
-	unsigned long *state = &paca_ptrs[first]->idle_state;
+	unsigned long *lock = &paca_ptrs[first]->idle_lock;
 
-	while (unlikely(test_and_set_bit_lock(NR_PNV_CORE_IDLE_LOCK_BIT, state)))
+	while (unlikely(test_and_set_bit_lock(NR_PNV_CORE_IDLE_LOCK_BIT, lock)))
 		barrier();
 }
 
@@ -258,29 +258,31 @@ static inline void atomic_unlock_and_stop_thread_idle(void)
 	int first = cpu_first_thread_sibling(cpu);
 	unsigned long thread = 1UL << cpu_thread_in_core(cpu);
 	unsigned long *state = &paca_ptrs[first]->idle_state;
+	unsigned long *lock = &paca_ptrs[first]->idle_lock;
 	u64 s = READ_ONCE(*state);
 	u64 new, tmp;
 
-	BUG_ON(!(s & PNV_CORE_IDLE_LOCK_BIT));
+	BUG_ON(!(READ_ONCE(*lock) & PNV_CORE_IDLE_LOCK_BIT));
 	BUG_ON(s & thread);
 
 again:
-	new = (s | thread) & ~PNV_CORE_IDLE_LOCK_BIT;
+	new = s | thread;
 	tmp = cmpxchg(state, s, new);
 	if (unlikely(tmp != s)) {
 		s = tmp;
 		goto again;
 	}
+	clear_bit_unlock(NR_PNV_CORE_IDLE_LOCK_BIT, lock);
 }
 
 static inline void atomic_unlock_thread_idle(void)
 {
 	int cpu = raw_smp_processor_id();
 	int first = cpu_first_thread_sibling(cpu);
-	unsigned long *state = &paca_ptrs[first]->idle_state;
+	unsigned long *lock = &paca_ptrs[first]->idle_lock;
 
-	BUG_ON(!test_bit(NR_PNV_CORE_IDLE_LOCK_BIT, state));
-	clear_bit_unlock(NR_PNV_CORE_IDLE_LOCK_BIT, state);
+	BUG_ON(!test_bit(NR_PNV_CORE_IDLE_LOCK_BIT, lock));
+	clear_bit_unlock(NR_PNV_CORE_IDLE_LOCK_BIT, lock);
 }
 
 /* P7 and P8 */
@@ -1169,8 +1171,9 @@ static void __init pnv_arch300_idle_init(void)
 	u64 max_residency_ns = 0;
 	int i;
 
-	/* stop is not really architected, we only have p9,p10 drivers */
-	if (!pvr_version_is(PVR_POWER10) && !pvr_version_is(PVR_POWER9))
+	/* stop is not really architected, we only have p9,p10 and p11 drivers */
+	if (!pvr_version_is(PVR_POWER9) && !pvr_version_is(PVR_POWER10) &&
+		!pvr_version_is(PVR_POWER11))
 		return;
 
 	/*
@@ -1187,8 +1190,8 @@ static void __init pnv_arch300_idle_init(void)
 		struct pnv_idle_states_t *state = &pnv_idle_states[i];
 		u64 psscr_rl = state->psscr_val & PSSCR_RL_MASK;
 
-		/* No deep loss driver implemented for POWER10 yet */
-		if (pvr_version_is(PVR_POWER10) &&
+		/* No deep loss driver implemented for POWER10 and POWER11 yet */
+		if ((pvr_version_is(PVR_POWER10) || pvr_version_is(PVR_POWER11)) &&
 				state->flags & (OPAL_PM_TIMEBASE_STOP|OPAL_PM_LOSE_FULL_CONTEXT))
 			continue;
 
@@ -1333,8 +1336,7 @@ static int __init pnv_parse_cpuidle_dt(void)
 	nr_idle_states = of_property_count_u32_elems(np,
 						"ibm,cpu-idle-state-flags");
 
-	pnv_idle_states = kcalloc(nr_idle_states, sizeof(*pnv_idle_states),
-				  GFP_KERNEL);
+	pnv_idle_states = kzalloc_objs(*pnv_idle_states, nr_idle_states);
 	temp_u32 = kcalloc(nr_idle_states, sizeof(u32),  GFP_KERNEL);
 	temp_u64 = kcalloc(nr_idle_states, sizeof(u64),  GFP_KERNEL);
 	temp_string = kcalloc(nr_idle_states, sizeof(char *),  GFP_KERNEL);

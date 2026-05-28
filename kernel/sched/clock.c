@@ -54,6 +54,9 @@
  *
  */
 
+#include <linux/sched/clock.h>
+#include "sched.h"
+
 /*
  * Scheduler clock - returns current time in nanosec units.
  * This is default implementation.
@@ -170,6 +173,7 @@ notrace static void __sched_clock_work(struct work_struct *work)
 			scd->tick_gtod, __gtod_offset,
 			scd->tick_raw,  __sched_clock_offset);
 
+	disable_sched_clock_irqtime();
 	static_branch_disable(&__sched_clock_stable);
 }
 
@@ -235,6 +239,8 @@ static int __init sched_clock_init_late(void)
 
 	if (__sched_clock_stable_early)
 		__set_sched_clock_stable();
+	else
+		disable_sched_clock_irqtime();  /* disable if clock unstable. */
 
 	return 0;
 }
@@ -266,7 +272,7 @@ static __always_inline u64 sched_clock_local(struct sched_clock_data *scd)
 	s64 delta;
 
 again:
-	now = sched_clock();
+	now = sched_clock_noinstr();
 	delta = now - scd->tick_raw;
 	if (unlikely(delta < 0))
 		delta = 0;
@@ -287,27 +293,34 @@ again:
 	clock = wrap_max(clock, min_clock);
 	clock = wrap_min(clock, max_clock);
 
-	if (!arch_try_cmpxchg64(&scd->clock, &old_clock, clock))
+	if (!raw_try_cmpxchg64(&scd->clock, &old_clock, clock))
 		goto again;
 
 	return clock;
 }
 
-noinstr u64 local_clock(void)
+noinstr u64 local_clock_noinstr(void)
 {
 	u64 clock;
 
 	if (static_branch_likely(&__sched_clock_stable))
-		return sched_clock() + __sched_clock_offset;
+		return sched_clock_noinstr() + __sched_clock_offset;
 
 	if (!static_branch_likely(&sched_clock_running))
-		return sched_clock();
+		return sched_clock_noinstr();
 
-	preempt_disable_notrace();
 	clock = sched_clock_local(this_scd());
-	preempt_enable_notrace();
 
 	return clock;
+}
+
+u64 local_clock(void)
+{
+	u64 now;
+	preempt_disable_notrace();
+	now = local_clock_noinstr();
+	preempt_enable_notrace();
+	return now;
 }
 EXPORT_SYMBOL_GPL(local_clock);
 
@@ -333,7 +346,7 @@ again:
 	this_clock = sched_clock_local(my_scd);
 	/*
 	 * We must enforce atomic readout on 32-bit, otherwise the
-	 * update on the remote CPU can hit inbetween the readout of
+	 * update on the remote CPU can hit in between the readout of
 	 * the low 32-bit and the high 32-bit portion.
 	 */
 	remote_clock = cmpxchg64(&scd->clock, 0, 0);
@@ -437,7 +450,7 @@ notrace void sched_clock_tick_stable(void)
 }
 
 /*
- * We are going deep-idle (irqs are disabled):
+ * We are going deep-idle (IRQs are disabled):
  */
 notrace void sched_clock_idle_sleep_event(void)
 {
@@ -464,7 +477,7 @@ notrace void sched_clock_idle_wakeup_event(void)
 }
 EXPORT_SYMBOL_GPL(sched_clock_idle_wakeup_event);
 
-#else /* CONFIG_HAVE_UNSTABLE_SCHED_CLOCK */
+#else /* !CONFIG_HAVE_UNSTABLE_SCHED_CLOCK: */
 
 void __init sched_clock_init(void)
 {
@@ -482,7 +495,7 @@ notrace u64 sched_clock_cpu(int cpu)
 	return sched_clock();
 }
 
-#endif /* CONFIG_HAVE_UNSTABLE_SCHED_CLOCK */
+#endif /* !CONFIG_HAVE_UNSTABLE_SCHED_CLOCK */
 
 /*
  * Running clock - returns the time that has elapsed while a guest has been

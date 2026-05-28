@@ -46,7 +46,7 @@ msm_fence_context_alloc(struct drm_device *dev, volatile uint32_t *fenceptr,
 	struct msm_fence_context *fctx;
 	static int index = 0;
 
-	fctx = kzalloc(sizeof(*fctx), GFP_KERNEL);
+	fctx = kzalloc_obj(*fctx);
 	if (!fctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -65,8 +65,7 @@ msm_fence_context_alloc(struct drm_device *dev, volatile uint32_t *fenceptr,
 	fctx->completed_fence = fctx->last_fence;
 	*fctx->fenceptr = fctx->last_fence;
 
-	hrtimer_init(&fctx->deadline_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	fctx->deadline_timer.function = deadline_timer;
+	hrtimer_setup(&fctx->deadline_timer, deadline_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
 	kthread_init_work(&fctx->deadline_work, deadline_work);
 
@@ -177,7 +176,7 @@ msm_fence_alloc(void)
 {
 	struct msm_fence *f;
 
-	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	f = kzalloc_obj(*f);
 	if (!f)
 		return ERR_PTR(-ENOMEM);
 
@@ -190,6 +189,12 @@ msm_fence_init(struct dma_fence *fence, struct msm_fence_context *fctx)
 	struct msm_fence *f = to_msm_fence(fence);
 
 	f->fctx = fctx;
+
+	/*
+	 * Until this point, the fence was just some pre-allocated memory,
+	 * no-one should have taken a reference to it yet.
+	 */
+	WARN_ON(kref_read(&fence->refcount));
 
 	dma_fence_init(&f->base, &msm_fence_ops, &fctx->spinlock,
 		       fctx->context, ++fctx->last_fence);

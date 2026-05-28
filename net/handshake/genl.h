@@ -2,6 +2,7 @@
 /* Do not edit directly, auto-generated from: */
 /*	Documentation/netlink/specs/handshake.yaml */
 /* YNL-GEN kernel header */
+/* To regenerate run: tools/net/ynl/ynl-regen.sh */
 
 #ifndef _LINUX_HANDSHAKE_GEN_H
 #define _LINUX_HANDSHAKE_GEN_H
@@ -9,7 +10,7 @@
 #include <net/netlink.h>
 #include <net/genetlink.h>
 
-#include <linux/handshake.h>
+#include <uapi/linux/handshake.h>
 
 int handshake_nl_accept_doit(struct sk_buff *skb, struct genl_info *info);
 int handshake_nl_done_doit(struct sk_buff *skb, struct genl_info *info);

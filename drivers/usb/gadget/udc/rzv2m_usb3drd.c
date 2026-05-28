@@ -58,7 +58,7 @@ void rzv2m_usb3drd_reset(struct device *dev, bool host)
 }
 EXPORT_SYMBOL_GPL(rzv2m_usb3drd_reset);
 
-static int rzv2m_usb3drd_remove(struct platform_device *pdev)
+static void rzv2m_usb3drd_remove(struct platform_device *pdev)
 {
 	struct rzv2m_usb3drd *usb3 = platform_get_drvdata(pdev);
 
@@ -66,8 +66,6 @@ static int rzv2m_usb3drd_remove(struct platform_device *pdev)
 	pm_runtime_put(usb3->dev);
 	pm_runtime_disable(&pdev->dev);
 	reset_control_assert(usb3->drd_rstc);
-
-	return 0;
 }
 
 static int rzv2m_usb3drd_probe(struct platform_device *pdev)

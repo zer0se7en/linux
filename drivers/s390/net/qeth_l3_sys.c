@@ -431,7 +431,7 @@ static ssize_t qeth_l3_dev_ipato_add_store(const char *buf, size_t count,
 	if (rc)
 		return rc;
 
-	ipatoe = kzalloc(sizeof(struct qeth_ipato_entry), GFP_KERNEL);
+	ipatoe = kzalloc_obj(struct qeth_ipato_entry);
 	if (!ipatoe)
 		return -ENOMEM;
 
@@ -625,7 +625,7 @@ static QETH_DEVICE_ATTR(vipa_add4, add4, 0644,
 static ssize_t qeth_l3_dev_vipa_del4_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	return qeth_l3_vipa_store(dev, buf, true, count, QETH_PROT_IPV4);
+	return qeth_l3_vipa_store(dev, buf, false, count, QETH_PROT_IPV4);
 }
 
 static QETH_DEVICE_ATTR(vipa_del4, del4, 0200, NULL,

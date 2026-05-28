@@ -447,7 +447,7 @@ EXPORT_SYMBOL_GPL(fcoe_check_wait_queue);
  */
 void fcoe_queue_timer(struct timer_list *t)
 {
-	struct fcoe_port *port = from_timer(port, t, timer);
+	struct fcoe_port *port = timer_container_of(port, t, timer);
 
 	fcoe_check_wait_queue(port->lport, NULL);
 }
@@ -638,7 +638,7 @@ static int fcoe_add_netdev_mapping(struct net_device *netdev,
 {
 	struct fcoe_netdev_mapping *nm;
 
-	nm = kmalloc(sizeof(*nm), GFP_KERNEL);
+	nm = kmalloc_obj(*nm);
 	if (!nm) {
 		printk(KERN_ERR "Unable to allocate netdev_mapping");
 		return -ENOMEM;
@@ -711,7 +711,7 @@ static struct net_device *fcoe_if_to_netdev(const char *buffer)
 	char ifname[IFNAMSIZ + 2];
 
 	if (buffer) {
-		strlcpy(ifname, buffer, IFNAMSIZ);
+		strscpy(ifname, buffer, IFNAMSIZ);
 		cp = ifname + strlen(ifname);
 		while (--cp >= ifname && *cp == '\n')
 			*cp = '\0';

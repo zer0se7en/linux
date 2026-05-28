@@ -11,10 +11,8 @@
 #include <linux/module.h>
 #include <linux/rtc.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 
@@ -305,7 +303,7 @@ static int mpc5121_rtc_probe(struct platform_device *op)
 		return PTR_ERR(rtc->regs);
 	}
 
-	device_init_wakeup(&op->dev, 1);
+	device_init_wakeup(&op->dev, true);
 
 	platform_set_drvdata(op, rtc);
 
@@ -400,10 +398,11 @@ static struct platform_driver mpc5121_rtc_driver = {
 		.of_match_table = of_match_ptr(mpc5121_rtc_match),
 	},
 	.probe = mpc5121_rtc_probe,
-	.remove_new = mpc5121_rtc_remove,
+	.remove = mpc5121_rtc_remove,
 };
 
 module_platform_driver(mpc5121_rtc_driver);
 
+MODULE_DESCRIPTION("Freescale MPC5121 built-in RTC driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("John Rigby <jcrigby@gmail.com>");

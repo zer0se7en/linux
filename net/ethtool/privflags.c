@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include "netlink.h"
-#include "common.h"
 #include "bitset.h"
+#include "common.h"
+#include "netlink.h"
 
 struct privflags_req_info {
 	struct ethnl_req_info		base;
@@ -57,7 +57,7 @@ static int ethnl_get_priv_flags_info(struct net_device *dev,
 
 static int privflags_prepare_data(const struct ethnl_req_info *req_base,
 				  struct ethnl_reply_data *reply_base,
-				  struct genl_info *info)
+				  const struct genl_info *info)
 {
 	struct privflags_reply_data *data = PRIVFLAGS_REPDATA(reply_base);
 	struct net_device *dev = reply_base->dev;

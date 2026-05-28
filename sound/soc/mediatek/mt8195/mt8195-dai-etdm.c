@@ -738,8 +738,7 @@ static int mt8195_etdm_clk_src_sel_put(struct snd_kcontrol *kcontrol,
 static int mt8195_etdm_clk_src_sel_get(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	unsigned int value = 0;
 	unsigned int reg = 0;
@@ -2456,25 +2455,6 @@ static int mtk_dai_hdmitx_dptx_set_sysclk(struct snd_soc_dai *dai,
 	return mtk_dai_etdm_cal_mclk(afe, freq, dai->id);
 }
 
-static const struct snd_soc_dai_ops mtk_dai_etdm_ops = {
-	.startup = mtk_dai_etdm_startup,
-	.shutdown = mtk_dai_etdm_shutdown,
-	.hw_params = mtk_dai_etdm_hw_params,
-	.trigger = mtk_dai_etdm_trigger,
-	.set_sysclk = mtk_dai_etdm_set_sysclk,
-	.set_fmt = mtk_dai_etdm_set_fmt,
-	.set_tdm_slot = mtk_dai_etdm_set_tdm_slot,
-};
-
-static const struct snd_soc_dai_ops mtk_dai_hdmitx_dptx_ops = {
-	.startup	= mtk_dai_hdmitx_dptx_startup,
-	.shutdown	= mtk_dai_hdmitx_dptx_shutdown,
-	.hw_params	= mtk_dai_hdmitx_dptx_hw_params,
-	.trigger	= mtk_dai_hdmitx_dptx_trigger,
-	.set_sysclk	= mtk_dai_hdmitx_dptx_set_sysclk,
-	.set_fmt	= mtk_dai_etdm_set_fmt,
-};
-
 /* dai driver */
 #define MTK_ETDM_RATES (SNDRV_PCM_RATE_8000_384000)
 
@@ -2505,6 +2485,36 @@ static int mtk_dai_etdm_probe(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static const struct snd_soc_dai_ops mtk_dai_hdmitx_dptx_ops = {
+	.startup	= mtk_dai_hdmitx_dptx_startup,
+	.shutdown	= mtk_dai_hdmitx_dptx_shutdown,
+	.hw_params	= mtk_dai_hdmitx_dptx_hw_params,
+	.trigger	= mtk_dai_hdmitx_dptx_trigger,
+	.set_sysclk	= mtk_dai_hdmitx_dptx_set_sysclk,
+	.set_fmt	= mtk_dai_etdm_set_fmt,
+};
+
+static const struct snd_soc_dai_ops mtk_dai_hdmitx_dptx_ops2 = {
+	.probe		= mtk_dai_etdm_probe,
+	.startup	= mtk_dai_hdmitx_dptx_startup,
+	.shutdown	= mtk_dai_hdmitx_dptx_shutdown,
+	.hw_params	= mtk_dai_hdmitx_dptx_hw_params,
+	.trigger	= mtk_dai_hdmitx_dptx_trigger,
+	.set_sysclk	= mtk_dai_hdmitx_dptx_set_sysclk,
+	.set_fmt	= mtk_dai_etdm_set_fmt,
+};
+
+static const struct snd_soc_dai_ops mtk_dai_etdm_ops = {
+	.probe		= mtk_dai_etdm_probe,
+	.startup	= mtk_dai_etdm_startup,
+	.shutdown	= mtk_dai_etdm_shutdown,
+	.hw_params	= mtk_dai_etdm_hw_params,
+	.trigger	= mtk_dai_etdm_trigger,
+	.set_sysclk	= mtk_dai_etdm_set_sysclk,
+	.set_fmt	= mtk_dai_etdm_set_fmt,
+	.set_tdm_slot	= mtk_dai_etdm_set_tdm_slot,
+};
+
 static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 	{
 		.name = "DPTX",
@@ -2529,7 +2539,6 @@ static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 			.formats = MTK_ETDM_FORMATS,
 		},
 		.ops = &mtk_dai_etdm_ops,
-		.probe = mtk_dai_etdm_probe,
 	},
 	{
 		.name = "ETDM2_IN",
@@ -2542,7 +2551,6 @@ static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 			.formats = MTK_ETDM_FORMATS,
 		},
 		.ops = &mtk_dai_etdm_ops,
-		.probe = mtk_dai_etdm_probe,
 	},
 	{
 		.name = "ETDM1_OUT",
@@ -2555,7 +2563,6 @@ static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 			.formats = MTK_ETDM_FORMATS,
 		},
 		.ops = &mtk_dai_etdm_ops,
-		.probe = mtk_dai_etdm_probe,
 	},
 	{
 		.name = "ETDM2_OUT",
@@ -2568,7 +2575,6 @@ static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 			.formats = MTK_ETDM_FORMATS,
 		},
 		.ops = &mtk_dai_etdm_ops,
-		.probe = mtk_dai_etdm_probe,
 	},
 	{
 		.name = "ETDM3_OUT",
@@ -2580,8 +2586,7 @@ static struct snd_soc_dai_driver mtk_dai_etdm_driver[] = {
 			.rates = MTK_ETDM_RATES,
 			.formats = MTK_ETDM_FORMATS,
 		},
-		.ops = &mtk_dai_hdmitx_dptx_ops,
-		.probe = mtk_dai_etdm_probe,
+		.ops = &mtk_dai_hdmitx_dptx_ops2,
 	},
 };
 
@@ -2646,14 +2651,9 @@ static void mt8195_dai_etdm_parse_of(struct mtk_base_afe *afe)
 
 		etdm_data = afe_priv->dai_priv[dai_id];
 
-		ret = snprintf(prop, sizeof(prop),
-			       "mediatek,%s-mclk-always-on-rate",
-			       of_afe_etdms[i].name);
-		if (ret < 0) {
-			dev_info(afe->dev, "%s snprintf err=%d\n",
-				 __func__, ret);
-			return;
-		}
+		scnprintf(prop, sizeof(prop),
+			    "mediatek,%s-mclk-always-on-rate",
+			    of_afe_etdms[i].name);
 		ret = of_property_read_u32(of_node, prop, &sel);
 		if (ret == 0) {
 			etdm_data->mclk_dir = SND_SOC_CLOCK_OUT;
@@ -2662,24 +2662,14 @@ static void mt8195_dai_etdm_parse_of(struct mtk_base_afe *afe)
 					 __func__, sel);
 		}
 
-		ret = snprintf(prop, sizeof(prop),
-			       "mediatek,%s-multi-pin-mode",
-			       of_afe_etdms[i].name);
-		if (ret < 0) {
-			dev_info(afe->dev, "%s snprintf err=%d\n",
-				 __func__, ret);
-			return;
-		}
+		scnprintf(prop, sizeof(prop),
+			    "mediatek,%s-multi-pin-mode",
+			    of_afe_etdms[i].name);
 		etdm_data->data_mode = of_property_read_bool(of_node, prop);
 
-		ret = snprintf(prop, sizeof(prop),
-			       "mediatek,%s-cowork-source",
-			       of_afe_etdms[i].name);
-		if (ret < 0) {
-			dev_info(afe->dev, "%s snprintf err=%d\n",
-				 __func__, ret);
-			return;
-		}
+		scnprintf(prop, sizeof(prop),
+			    "mediatek,%s-cowork-source",
+			    of_afe_etdms[i].name);
 		ret = of_property_read_u32(of_node, prop, &sel);
 		if (ret == 0) {
 			if (sel >= MT8195_AFE_IO_ETDM_NUM) {
@@ -2701,14 +2691,9 @@ static void mt8195_dai_etdm_parse_of(struct mtk_base_afe *afe)
 		dai_id = ETDM_TO_DAI_ID(i);
 		etdm_data = afe_priv->dai_priv[dai_id];
 
-		ret = snprintf(prop, sizeof(prop),
-			       "mediatek,%s-chn-disabled",
-			       of_afe_etdms[i].name);
-		if (ret < 0) {
-			dev_info(afe->dev, "%s snprintf err=%d\n",
-				 __func__, ret);
-			return;
-		}
+		scnprintf(prop, sizeof(prop),
+			    "mediatek,%s-chn-disabled",
+			    of_afe_etdms[i].name);
 		ret = of_property_read_variable_u8_array(of_node, prop,
 							 disable_chn,
 							 1, max_chn);

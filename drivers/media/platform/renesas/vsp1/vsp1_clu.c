@@ -113,7 +113,7 @@ static const struct v4l2_ctrl_config clu_mode_control = {
 };
 
 /* -----------------------------------------------------------------------------
- * V4L2 Subdevice Pad Operations
+ * V4L2 Subdevice Operations
  */
 
 static const unsigned int clu_codes[] = {
@@ -122,47 +122,15 @@ static const unsigned int clu_codes[] = {
 	MEDIA_BUS_FMT_AYUV8_1X32,
 };
 
-static int clu_enum_mbus_code(struct v4l2_subdev *subdev,
-			      struct v4l2_subdev_state *sd_state,
-			      struct v4l2_subdev_mbus_code_enum *code)
-{
-	return vsp1_subdev_enum_mbus_code(subdev, sd_state, code, clu_codes,
-					  ARRAY_SIZE(clu_codes));
-}
-
-static int clu_enum_frame_size(struct v4l2_subdev *subdev,
-			       struct v4l2_subdev_state *sd_state,
-			       struct v4l2_subdev_frame_size_enum *fse)
-{
-	return vsp1_subdev_enum_frame_size(subdev, sd_state, fse,
-					   CLU_MIN_SIZE,
-					   CLU_MIN_SIZE, CLU_MAX_SIZE,
-					   CLU_MAX_SIZE);
-}
-
-static int clu_set_format(struct v4l2_subdev *subdev,
-			  struct v4l2_subdev_state *sd_state,
-			  struct v4l2_subdev_format *fmt)
-{
-	return vsp1_subdev_set_pad_format(subdev, sd_state, fmt, clu_codes,
-					  ARRAY_SIZE(clu_codes),
-					  CLU_MIN_SIZE, CLU_MIN_SIZE,
-					  CLU_MAX_SIZE, CLU_MAX_SIZE);
-}
-
-/* -----------------------------------------------------------------------------
- * V4L2 Subdevice Operations
- */
-
 static const struct v4l2_subdev_pad_ops clu_pad_ops = {
-	.init_cfg = vsp1_entity_init_cfg,
-	.enum_mbus_code = clu_enum_mbus_code,
-	.enum_frame_size = clu_enum_frame_size,
+	.enum_mbus_code = vsp1_subdev_enum_mbus_code,
+	.enum_frame_size = vsp1_subdev_enum_frame_size,
 	.get_fmt = vsp1_subdev_get_pad_format,
-	.set_fmt = clu_set_format,
+	.set_fmt = vsp1_subdev_set_pad_format,
 };
 
 static const struct v4l2_subdev_ops clu_ops = {
+	.core	= &vsp1_entity_core_ops,
 	.pad    = &clu_pad_ops,
 };
 
@@ -171,6 +139,7 @@ static const struct v4l2_subdev_ops clu_ops = {
  */
 
 static void clu_configure_stream(struct vsp1_entity *entity,
+				 struct v4l2_subdev_state *state,
 				 struct vsp1_pipeline *pipe,
 				 struct vsp1_dl_list *dl,
 				 struct vsp1_dl_body *dlb)
@@ -182,9 +151,7 @@ static void clu_configure_stream(struct vsp1_entity *entity,
 	 * The yuv_mode can't be changed during streaming. Cache it internally
 	 * for future runtime configuration calls.
 	 */
-	format = vsp1_entity_get_pad_format(&clu->entity,
-					    clu->entity.config,
-					    CLU_PAD_SINK);
+	format = v4l2_subdev_state_get_format(state, CLU_PAD_SINK);
 	clu->yuv_mode = format->code == MEDIA_BUS_FMT_AYUV8_1X32;
 }
 
@@ -249,6 +216,12 @@ struct vsp1_clu *vsp1_clu_create(struct vsp1_device *vsp1)
 
 	clu->entity.ops = &clu_entity_ops;
 	clu->entity.type = VSP1_ENTITY_CLU;
+	clu->entity.codes = clu_codes;
+	clu->entity.num_codes = ARRAY_SIZE(clu_codes);
+	clu->entity.min_width = CLU_MIN_SIZE;
+	clu->entity.min_height = CLU_MIN_SIZE;
+	clu->entity.max_width = CLU_MAX_SIZE;
+	clu->entity.max_height = CLU_MAX_SIZE;
 
 	ret = vsp1_entity_init(vsp1, &clu->entity, "clu", 2, &clu_ops,
 			       MEDIA_ENT_F_PROC_VIDEO_LUT);

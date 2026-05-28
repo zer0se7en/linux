@@ -19,46 +19,13 @@
 #include "mae.h"
 #include "ef100_rep.h"
 #endif
+#include "efx_reflash.h"
 
 struct efx_devlink {
 	struct efx_nic *efx;
 };
 
 #ifdef CONFIG_SFC_SRIOV
-static void efx_devlink_del_port(struct devlink_port *dl_port)
-{
-	if (!dl_port)
-		return;
-	devl_port_unregister(dl_port);
-}
-
-static int efx_devlink_add_port(struct efx_nic *efx,
-				struct mae_mport_desc *mport)
-{
-	bool external = false;
-
-	if (!ef100_mport_on_local_intf(efx, mport))
-		external = true;
-
-	switch (mport->mport_type) {
-	case MAE_MPORT_DESC_MPORT_TYPE_VNIC:
-		if (mport->vf_idx != MAE_MPORT_DESC_VF_IDX_NULL)
-			devlink_port_attrs_pci_vf_set(&mport->dl_port, 0, mport->pf_idx,
-						      mport->vf_idx,
-						      external);
-		else
-			devlink_port_attrs_pci_pf_set(&mport->dl_port, 0, mport->pf_idx,
-						      external);
-		break;
-	default:
-		/* MAE_MPORT_DESC_MPORT_ALIAS and UNDEFINED */
-		return 0;
-	}
-
-	mport->dl_port.index = mport->mport_id;
-
-	return devl_port_register(efx->devlink, &mport->dl_port, mport->mport_id);
-}
 
 static int efx_devlink_port_addr_get(struct devlink_port *port, u8 *hw_addr,
 				     int *hw_addr_len,
@@ -156,6 +123,48 @@ static int efx_devlink_port_addr_set(struct devlink_port *port,
 				   mport_desc->mport_id);
 
 	return rc;
+}
+
+static const struct devlink_port_ops sfc_devlink_port_ops = {
+	.port_fn_hw_addr_get = efx_devlink_port_addr_get,
+	.port_fn_hw_addr_set = efx_devlink_port_addr_set,
+};
+
+static void efx_devlink_del_port(struct devlink_port *dl_port)
+{
+	if (!dl_port)
+		return;
+	devl_port_unregister(dl_port);
+}
+
+static int efx_devlink_add_port(struct efx_nic *efx,
+				struct mae_mport_desc *mport)
+{
+	bool external = false;
+
+	if (!ef100_mport_on_local_intf(efx, mport))
+		external = true;
+
+	switch (mport->mport_type) {
+	case MAE_MPORT_DESC_MPORT_TYPE_VNIC:
+		if (mport->vf_idx != MAE_MPORT_DESC_VF_IDX_NULL)
+			devlink_port_attrs_pci_vf_set(&mport->dl_port, 0, mport->pf_idx,
+						      mport->vf_idx,
+						      external);
+		else
+			devlink_port_attrs_pci_pf_set(&mport->dl_port, 0, mport->pf_idx,
+						      external);
+		break;
+	default:
+		/* MAE_MPORT_DESC_MPORT_ALIAS and UNDEFINED */
+		return 0;
+	}
+
+	mport->dl_port.index = mport->mport_id;
+
+	return devl_port_register_with_ops(efx->devlink, &mport->dl_port,
+					   mport->mport_id,
+					   &sfc_devlink_port_ops);
 }
 
 #endif
@@ -522,7 +531,7 @@ static int efx_devlink_info_running_versions(struct efx_nic *efx,
 	if (rc || outlength < MC_CMD_GET_VERSION_OUT_LEN) {
 		netif_err(efx, drv, efx->net_dev,
 			  "mcdi MC_CMD_GET_VERSION failed\n");
-		return rc;
+		return rc ?: -EIO;
 	}
 
 	/* Handle previous output */
@@ -607,12 +616,20 @@ static int efx_devlink_info_get(struct devlink *devlink,
 	return 0;
 }
 
+static int efx_devlink_flash_update(struct devlink *devlink,
+				    struct devlink_flash_update_params *params,
+				    struct netlink_ext_ack *extack)
+{
+	struct efx_devlink *devlink_private = devlink_priv(devlink);
+	struct efx_nic *efx = devlink_private->efx;
+
+	return efx_reflash_flash_firmware(efx, params->fw, extack);
+}
+
 static const struct devlink_ops sfc_devlink_ops = {
+	.supported_flash_update_params	= 0,
+	.flash_update			= efx_devlink_flash_update,
 	.info_get			= efx_devlink_info_get,
-#ifdef CONFIG_SFC_SRIOV
-	.port_function_hw_addr_get	= efx_devlink_port_addr_get,
-	.port_function_hw_addr_set	= efx_devlink_port_addr_set,
-#endif
 };
 
 #ifdef CONFIG_SFC_SRIOV
@@ -621,6 +638,9 @@ static struct devlink_port *ef100_set_devlink_port(struct efx_nic *efx, u32 idx)
 	struct mae_mport_desc *mport;
 	u32 id;
 	int rc;
+
+	if (!efx->mae)
+		return NULL;
 
 	if (efx_mae_lookup_mport(efx, idx, &id)) {
 		/* This should not happen. */

@@ -26,7 +26,7 @@
 #ifndef __DAL_DDC_SERVICE_H__
 #define __DAL_DDC_SERVICE_H__
 
-#include "link.h"
+#include "link_service.h"
 
 #define AUX_POWER_UP_WA_DELAY 500
 #define I2C_OVER_AUX_DEFER_WA_DELAY 70
@@ -71,6 +71,20 @@ bool link_query_ddc_data(
  */
 bool link_aux_transfer_with_retries_no_mutex(struct ddc_service *ddc,
 		struct aux_payload *payload);
+
+bool link_configure_fixed_vs_pe_retimer(
+		struct ddc_service *ddc,
+		const uint8_t *data,
+		uint32_t length);
+
+bool link_query_fixed_vs_pe_retimer(
+		struct ddc_service *ddc,
+		uint8_t *data,
+		uint32_t length);
+
+uint32_t link_get_fixed_vs_pe_retimer_read_address(struct dc_link *link);
+uint32_t link_get_fixed_vs_pe_retimer_write_address(struct dc_link *link);
+
 
 void write_scdc_data(
 		struct ddc_service *ddc_service,

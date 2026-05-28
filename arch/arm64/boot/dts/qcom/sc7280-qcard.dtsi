@@ -16,7 +16,7 @@
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 
-#include "sc7280.dtsi"
+#include "kodiak.dtsi"
 
 /* PMICs depend on spmi_bus label and so must come after SoC */
 #include "pm7325.dtsi"
@@ -383,13 +383,13 @@
 };
 
 &pmk8350_vadc {
-	pmk8350-die-temp@3 {
+	channel@3 {
 		reg = <PMK8350_ADC7_DIE_TEMP>;
 		label = "pmk8350_die_temp";
 		qcom,pre-scaling = <1 1>;
 	};
 
-	pmr735a-die-temp@403 {
+	channel@403 {
 		reg = <PMR735A_ADC7_DIE_TEMP>;
 		label = "pmr735a_die_temp";
 		qcom,pre-scaling = <1 1>;
@@ -427,7 +427,6 @@
 };
 
 uart_dbg: &uart5 {
-	compatible = "qcom,geni-debug-uart";
 	status = "okay";
 };
 

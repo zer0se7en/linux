@@ -34,7 +34,8 @@
 
 /* Limit how long of an event name plus args within the subsystem. */
 #define MAX_EVENT_DESC 512
-#define EVENT_NAME(user_event) ((user_event)->tracepoint.name)
+#define EVENT_NAME(user_event) ((user_event)->reg_name)
+#define EVENT_TP_NAME(user_event) ((user_event)->tracepoint.name)
 #define MAX_FIELD_ARRAY_SIZE 1024
 
 /*
@@ -54,10 +55,13 @@
  * allows isolation for events by various means.
  */
 struct user_event_group {
-	char		*system_name;
-	struct		hlist_node node;
-	struct		mutex reg_mutex;
+	char			*system_name;
+	char			*system_multi_name;
+	struct hlist_node	node;
+	struct mutex		reg_mutex;
 	DECLARE_HASHTABLE(register_table, 8);
+	/* ID that moves forward within the group for multi-event names */
+	u64			multi_id;
 };
 
 /* Group for init_user_ns mapping, top-most group */
@@ -78,6 +82,7 @@ static unsigned int current_user_events;
  */
 struct user_event {
 	struct user_event_group		*group;
+	char				*reg_name;
 	struct tracepoint		tracepoint;
 	struct trace_event_call		call;
 	struct trace_event_class	class;
@@ -85,8 +90,10 @@ struct user_event {
 	struct hlist_node		node;
 	struct list_head		fields;
 	struct list_head		validators;
+	struct work_struct		put_work;
 	refcount_t			refcnt;
 	int				min_size;
+	int				reg_flags;
 	char				status;
 };
 
@@ -113,12 +120,19 @@ struct user_event_enabler {
 /* Bit 7 is for freeing status of enablement */
 #define ENABLE_VAL_FREEING_BIT 7
 
-/* Only duplicate the bit value */
-#define ENABLE_VAL_DUP_MASK ENABLE_VAL_BIT_MASK
+/* Bit 8 is for marking 32-bit on 64-bit */
+#define ENABLE_VAL_32_ON_64_BIT 8
+
+#define ENABLE_VAL_COMPAT_MASK (1 << ENABLE_VAL_32_ON_64_BIT)
+
+/* Only duplicate the bit and compat values */
+#define ENABLE_VAL_DUP_MASK (ENABLE_VAL_BIT_MASK | ENABLE_VAL_COMPAT_MASK)
 
 #define ENABLE_BITOPS(e) (&(e)->values)
 
 #define ENABLE_BIT(e) ((int)((e)->values & ENABLE_VAL_BIT_MASK))
+
+#define EVENT_MULTI_FORMAT(f) ((f) & USER_EVENT_REG_MULTI_FORMAT)
 
 /* Used for asynchronous faulting in of pages */
 struct user_event_enabler_fault {
@@ -160,42 +174,177 @@ struct user_event_validator {
 	int			flags;
 };
 
+static inline void align_addr_bit(unsigned long *addr, int *bit,
+				  unsigned long *flags)
+{
+	if (IS_ALIGNED(*addr, sizeof(long))) {
+#ifdef __BIG_ENDIAN
+		/* 32 bit on BE 64 bit requires a 32 bit offset when aligned. */
+		if (test_bit(ENABLE_VAL_32_ON_64_BIT, flags))
+			*bit += 32;
+#endif
+		return;
+	}
+
+	*addr = ALIGN_DOWN(*addr, sizeof(long));
+
+	/*
+	 * We only support 32 and 64 bit values. The only time we need
+	 * to align is a 32 bit value on a 64 bit kernel, which on LE
+	 * is always 32 bits, and on BE requires no change when unaligned.
+	 */
+#ifdef __LITTLE_ENDIAN
+	*bit += 32;
+#endif
+}
+
 typedef void (*user_event_func_t) (struct user_event *user, struct iov_iter *i,
 				   void *tpdata, bool *faulted);
 
 static int user_event_parse(struct user_event_group *group, char *name,
 			    char *args, char *flags,
-			    struct user_event **newuser);
+			    struct user_event **newuser, int reg_flags);
 
 static struct user_event_mm *user_event_mm_get(struct user_event_mm *mm);
 static struct user_event_mm *user_event_mm_get_all(struct user_event *user);
 static void user_event_mm_put(struct user_event_mm *mm);
+static int destroy_user_event(struct user_event *user);
+static bool user_fields_match(struct user_event *user, int argc,
+			      const char **argv);
 
 static u32 user_event_key(char *name)
 {
 	return jhash(name, strlen(name), 0);
 }
 
+static bool user_event_capable(u16 reg_flags)
+{
+	/* Persistent events require CAP_PERFMON / CAP_SYS_ADMIN */
+	if (reg_flags & USER_EVENT_REG_PERSIST) {
+		if (!perfmon_capable())
+			return false;
+	}
+
+	return true;
+}
+
+static struct user_event *user_event_get(struct user_event *user)
+{
+	refcount_inc(&user->refcnt);
+
+	return user;
+}
+
+static void delayed_destroy_user_event(struct work_struct *work)
+{
+	struct user_event *user = container_of(
+		work, struct user_event, put_work);
+
+	mutex_lock(&event_mutex);
+
+	if (!refcount_dec_and_test(&user->refcnt))
+		goto out;
+
+	if (destroy_user_event(user)) {
+		/*
+		 * The only reason this would fail here is if we cannot
+		 * update the visibility of the event. In this case the
+		 * event stays in the hashtable, waiting for someone to
+		 * attempt to delete it later.
+		 */
+		pr_warn("user_events: Unable to delete event\n");
+		refcount_set(&user->refcnt, 1);
+	}
+out:
+	mutex_unlock(&event_mutex);
+}
+
+static void user_event_put(struct user_event *user, bool locked)
+{
+	bool delete;
+
+	if (unlikely(!user))
+		return;
+
+	/*
+	 * When the event is not enabled for auto-delete there will always
+	 * be at least 1 reference to the event. During the event creation
+	 * we initially set the refcnt to 2 to achieve this. In those cases
+	 * the caller must acquire event_mutex and after decrement check if
+	 * the refcnt is 1, meaning this is the last reference. When auto
+	 * delete is enabled, there will only be 1 ref, IE: refcnt will be
+	 * only set to 1 during creation to allow the below checks to go
+	 * through upon the last put. The last put must always be done with
+	 * the event mutex held.
+	 */
+	if (!locked) {
+		lockdep_assert_not_held(&event_mutex);
+		delete = refcount_dec_and_mutex_lock(&user->refcnt, &event_mutex);
+	} else {
+		lockdep_assert_held(&event_mutex);
+		delete = refcount_dec_and_test(&user->refcnt);
+	}
+
+	if (!delete)
+		return;
+
+	/*
+	 * We now have the event_mutex in all cases, which ensures that
+	 * no new references will be taken until event_mutex is released.
+	 * New references come through find_user_event(), which requires
+	 * the event_mutex to be held.
+	 */
+
+	if (user->reg_flags & USER_EVENT_REG_PERSIST) {
+		/* We should not get here when persist flag is set */
+		pr_alert("BUG: Auto-delete engaged on persistent event\n");
+		goto out;
+	}
+
+	/*
+	 * Unfortunately we have to attempt the actual destroy in a work
+	 * queue. This is because not all cases handle a trace_event_call
+	 * being removed within the class->reg() operation for unregister.
+	 */
+	INIT_WORK(&user->put_work, delayed_destroy_user_event);
+
+	/*
+	 * Since the event is still in the hashtable, we have to re-inc
+	 * the ref count to 1. This count will be decremented and checked
+	 * in the work queue to ensure it's still the last ref. This is
+	 * needed because a user-process could register the same event in
+	 * between the time of event_mutex release and the work queue
+	 * running the delayed destroy. If we removed the item now from
+	 * the hashtable, this would result in a timing window where a
+	 * user process would fail a register because the trace_event_call
+	 * register would fail in the tracing layers.
+	 */
+	refcount_set(&user->refcnt, 1);
+
+	if (WARN_ON_ONCE(!schedule_work(&user->put_work))) {
+		/*
+		 * If we fail we must wait for an admin to attempt delete or
+		 * another register/close of the event, whichever is first.
+		 */
+		pr_warn("user_events: Unable to queue delayed destroy\n");
+	}
+out:
+	/* Ensure if we didn't have event_mutex before we unlock it */
+	if (!locked)
+		mutex_unlock(&event_mutex);
+}
+
 static void user_event_group_destroy(struct user_event_group *group)
 {
 	kfree(group->system_name);
+	kfree(group->system_multi_name);
 	kfree(group);
 }
 
-static char *user_event_group_system_name(struct user_namespace *user_ns)
+static char *user_event_group_system_name(void)
 {
 	char *system_name;
 	int len = sizeof(USER_EVENTS_SYSTEM) + 1;
-
-	if (user_ns != &init_user_ns) {
-		/*
-		 * Unexpected at this point:
-		 * We only currently support init_user_ns.
-		 * When we enable more, this will trigger a failure so log.
-		 */
-		pr_warn("user_events: Namespace other than init_user_ns!\n");
-		return NULL;
-	}
 
 	system_name = kmalloc(len, GFP_KERNEL);
 
@@ -207,45 +356,33 @@ static char *user_event_group_system_name(struct user_namespace *user_ns)
 	return system_name;
 }
 
-static inline struct user_event_group
-*user_event_group_from_user_ns(struct user_namespace *user_ns)
+static char *user_event_group_system_multi_name(void)
 {
-	if (user_ns == &init_user_ns)
-		return init_group;
-
-	return NULL;
+	return kstrdup(USER_EVENTS_MULTI_SYSTEM, GFP_KERNEL);
 }
 
 static struct user_event_group *current_user_event_group(void)
 {
-	struct user_namespace *user_ns = current_user_ns();
-	struct user_event_group *group = NULL;
-
-	while (user_ns) {
-		group = user_event_group_from_user_ns(user_ns);
-
-		if (group)
-			break;
-
-		user_ns = user_ns->parent;
-	}
-
-	return group;
+	return init_group;
 }
 
-static struct user_event_group
-*user_event_group_create(struct user_namespace *user_ns)
+static struct user_event_group *user_event_group_create(void)
 {
 	struct user_event_group *group;
 
-	group = kzalloc(sizeof(*group), GFP_KERNEL);
+	group = kzalloc_obj(*group);
 
 	if (!group)
 		return NULL;
 
-	group->system_name = user_event_group_system_name(user_ns);
+	group->system_name = user_event_group_system_name();
 
 	if (!group->system_name)
+		goto error;
+
+	group->system_multi_name = user_event_group_system_multi_name();
+
+	if (!group->system_multi_name)
 		goto error;
 
 	mutex_init(&group->reg_mutex);
@@ -259,12 +396,13 @@ error:
 	return NULL;
 };
 
-static void user_event_enabler_destroy(struct user_event_enabler *enabler)
+static void user_event_enabler_destroy(struct user_event_enabler *enabler,
+				       bool locked)
 {
 	list_del_rcu(&enabler->mm_enablers_link);
 
 	/* No longer tracking the event via the enabler */
-	refcount_dec(&enabler->event->refcnt);
+	user_event_put(enabler->event, locked);
 
 	kfree(enabler);
 }
@@ -317,7 +455,7 @@ static void user_event_enabler_fault_fixup(struct work_struct *work)
 	if (ret && ret != -ENOENT) {
 		struct user_event *user = enabler->event;
 
-		pr_warn("user_events: Fault for mm: 0x%pK @ 0x%llx event: %s\n",
+		pr_warn("user_events: Fault for mm: 0x%p @ 0x%llx event: %s\n",
 			mm->mm, (unsigned long long)uaddr, EVENT_NAME(user));
 	}
 
@@ -326,7 +464,7 @@ static void user_event_enabler_fault_fixup(struct work_struct *work)
 
 	/* User asked for enabler to be removed during fault */
 	if (test_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(enabler))) {
-		user_event_enabler_destroy(enabler);
+		user_event_enabler_destroy(enabler, true);
 		goto out;
 	}
 
@@ -358,7 +496,7 @@ static bool user_event_enabler_queue_fault(struct user_event_mm *mm,
 {
 	struct user_event_enabler_fault *fault;
 
-	fault = kmem_cache_zalloc(fault_cache, GFP_NOWAIT | __GFP_NOWARN);
+	fault = kmem_cache_zalloc(fault_cache, GFP_NOWAIT);
 
 	if (!fault)
 		return false;
@@ -392,6 +530,7 @@ static int user_event_enabler_write(struct user_event_mm *mm,
 	unsigned long *ptr;
 	struct page *page;
 	void *kaddr;
+	int bit = ENABLE_BIT(enabler);
 	int ret;
 
 	lockdep_assert_held(&event_mutex);
@@ -407,8 +546,10 @@ static int user_event_enabler_write(struct user_event_mm *mm,
 		     test_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(enabler))))
 		return -EBUSY;
 
+	align_addr_bit(&uaddr, &bit, ENABLE_BITOPS(enabler));
+
 	ret = pin_user_pages_remote(mm->mm, uaddr, 1, FOLL_WRITE | FOLL_NOFAULT,
-				    &page, NULL, NULL);
+				    &page, NULL);
 
 	if (unlikely(ret <= 0)) {
 		if (!fixup_fault)
@@ -425,9 +566,9 @@ static int user_event_enabler_write(struct user_event_mm *mm,
 
 	/* Update bit atomically, user tracers must be atomic as well */
 	if (enabler->event && enabler->event->status)
-		set_bit(ENABLE_BIT(enabler), ptr);
+		set_bit(bit, ptr);
 	else
-		clear_bit(ENABLE_BIT(enabler), ptr);
+		clear_bit(bit, ptr);
 
 	kunmap_local(kaddr);
 	unpin_user_pages_dirty_lock(&page, 1, true);
@@ -496,18 +637,16 @@ static bool user_event_enabler_dup(struct user_event_enabler *orig,
 	if (unlikely(test_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(orig))))
 		return true;
 
-	enabler = kzalloc(sizeof(*enabler), GFP_NOWAIT | __GFP_ACCOUNT);
+	enabler = kzalloc_obj(*enabler, GFP_NOWAIT | __GFP_ACCOUNT);
 
 	if (!enabler)
 		return false;
 
-	enabler->event = orig->event;
+	enabler->event = user_event_get(orig->event);
 	enabler->addr = orig->addr;
 
 	/* Only dup part of value (ignore future flags, etc) */
 	enabler->values = orig->values & ENABLE_VAL_DUP_MASK;
-
-	refcount_inc(&enabler->event->refcnt);
 
 	/* Enablers not exposed yet, RCU not required */
 	list_add(&enabler->mm_enablers_link, &mm->enablers);
@@ -567,7 +706,7 @@ static struct user_event_mm *user_event_mm_alloc(struct task_struct *t)
 {
 	struct user_event_mm *user_mm;
 
-	user_mm = kzalloc(sizeof(*user_mm), GFP_KERNEL_ACCOUNT);
+	user_mm = kzalloc_obj(*user_mm, GFP_KERNEL_ACCOUNT);
 
 	if (!user_mm)
 		return NULL;
@@ -625,7 +764,7 @@ static void user_event_mm_destroy(struct user_event_mm *mm)
 	struct user_event_enabler *enabler, *next;
 
 	list_for_each_entry_safe(enabler, next, &mm->enablers, mm_enablers_link)
-		user_event_enabler_destroy(enabler);
+		user_event_enabler_destroy(enabler, false);
 
 	mmdrop(mm->mm);
 	kfree(mm);
@@ -696,7 +835,7 @@ void user_event_mm_remove(struct task_struct *t)
 	 * so we use a work queue after call_rcu() to run within.
 	 */
 	INIT_RCU_WORK(&mm->put_rwork, delayed_user_event_mm_put);
-	queue_rcu_work(system_wq, &mm->put_rwork);
+	queue_rcu_work(system_percpu_wq, &mm->put_rwork);
 }
 
 void user_event_mm_dup(struct task_struct *t, struct user_event_mm *old_mm)
@@ -753,7 +892,7 @@ static struct user_event_enabler
 	if (!user_mm)
 		return NULL;
 
-	enabler = kzalloc(sizeof(*enabler), GFP_KERNEL_ACCOUNT);
+	enabler = kzalloc_obj(*enabler, GFP_KERNEL_ACCOUNT);
 
 	if (!enabler)
 		goto out;
@@ -761,6 +900,12 @@ static struct user_event_enabler
 	enabler->event = user;
 	enabler->addr = uaddr;
 	enabler->values = reg->enable_bit;
+
+#if BITS_PER_LONG >= 64
+	if (reg->enable_size == 4)
+		set_bit(ENABLE_VAL_32_ON_64_BIT, ENABLE_BITOPS(enabler));
+#endif
+
 retry:
 	/* Prevents state changes from racing with new enablers */
 	mutex_lock(&event_mutex);
@@ -780,7 +925,7 @@ retry:
 	 * exit or run exec(), which includes forks and clones.
 	 */
 	if (!*write_result) {
-		refcount_inc(&enabler->event->refcnt);
+		user_event_get(user);
 		list_add_rcu(&enabler->mm_enablers_link, &user_mm->enablers);
 	}
 
@@ -803,7 +948,12 @@ out:
 static __always_inline __must_check
 bool user_event_last_ref(struct user_event *user)
 {
-	return refcount_read(&user->refcnt) == 1;
+	int last = 0;
+
+	if (user->reg_flags & USER_EVENT_REG_PERSIST)
+		last = 1;
+
+	return refcount_read(&user->refcnt) == last;
 }
 
 static __always_inline __must_check
@@ -842,7 +992,8 @@ static struct list_head *user_event_get_fields(struct trace_event_call *call)
  * Upon success user_event has its ref count increased by 1.
  */
 static int user_event_parse_cmd(struct user_event_group *group,
-				char *raw_command, struct user_event **newuser)
+				char *raw_command, struct user_event **newuser,
+				int reg_flags)
 {
 	char *name = raw_command;
 	char *args = strpbrk(name, " ");
@@ -856,7 +1007,7 @@ static int user_event_parse_cmd(struct user_event_group *group,
 	if (flags)
 		*flags++ = '\0';
 
-	return user_event_parse(group, name, args, flags, newuser);
+	return user_event_parse(group, name, args, flags, newuser, reg_flags);
 }
 
 static int user_field_array_size(const char *type)
@@ -890,7 +1041,7 @@ static int user_field_array_size(const char *type)
 
 static int user_field_size(const char *type)
 {
-	/* long is not allowed from a user, since it's ambigious in size */
+	/* long is not allowed from a user, since it's ambiguous in size */
 	if (strcmp(type, "s64") == 0)
 		return sizeof(s64);
 	if (strcmp(type, "u64") == 0)
@@ -928,7 +1079,7 @@ static int user_field_size(const char *type)
 	if (str_has_prefix(type, "__rel_loc "))
 		return sizeof(u32);
 
-	/* Uknown basic type, error */
+	/* Unknown basic type, error */
 	return -EINVAL;
 }
 
@@ -962,7 +1113,7 @@ static int user_event_add_field(struct user_event *user, const char *type,
 	struct ftrace_event_field *field;
 	int validator_flags = 0;
 
-	field = kmalloc(sizeof(*field), GFP_KERNEL_ACCOUNT);
+	field = kmalloc_obj(*field, GFP_KERNEL_ACCOUNT);
 
 	if (!field)
 		return -ENOMEM;
@@ -981,7 +1132,7 @@ add_validator:
 	if (strstr(type, "char") != NULL)
 		validator_flags |= VALIDATOR_ENSURE_NULL;
 
-	validator = kmalloc(sizeof(*validator), GFP_KERNEL_ACCOUNT);
+	validator = kmalloc_obj(*validator, GFP_KERNEL_ACCOUNT);
 
 	if (!validator) {
 		kfree(field);
@@ -1223,6 +1374,9 @@ static int user_field_set_string(struct ftrace_event_field *field,
 	pos += snprintf(buf + pos, LEN_OR_ZERO, " ");
 	pos += snprintf(buf + pos, LEN_OR_ZERO, "%s", field->name);
 
+	if (str_has_prefix(field->type, "struct "))
+		pos += snprintf(buf + pos, LEN_OR_ZERO, " %d", field->size);
+
 	if (colon)
 		pos += snprintf(buf + pos, LEN_OR_ZERO, ";");
 
@@ -1231,14 +1385,14 @@ static int user_field_set_string(struct ftrace_event_field *field,
 
 static int user_event_set_print_fmt(struct user_event *user, char *buf, int len)
 {
-	struct ftrace_event_field *field, *next;
+	struct ftrace_event_field *field;
 	struct list_head *head = &user->fields;
 	int pos = 0, depth = 0;
 	const char *str_func;
 
 	pos += snprintf(buf + pos, LEN_OR_ZERO, "\"");
 
-	list_for_each_entry_safe_reverse(field, next, head, link) {
+	list_for_each_entry_reverse(field, head, link) {
 		if (depth != 0)
 			pos += snprintf(buf + pos, LEN_OR_ZERO, " ");
 
@@ -1250,7 +1404,7 @@ static int user_event_set_print_fmt(struct user_event *user, char *buf, int len)
 
 	pos += snprintf(buf + pos, LEN_OR_ZERO, "\"");
 
-	list_for_each_entry_safe_reverse(field, next, head, link) {
+	list_for_each_entry_reverse(field, head, link) {
 		if (user_field_is_dyn_string(field->type, &str_func))
 			pos += snprintf(buf + pos, LEN_OR_ZERO,
 					", %s(%s)", str_func, field->name);
@@ -1295,12 +1449,7 @@ static struct trace_event_functions user_event_funcs = {
 
 static int user_event_set_call_visible(struct user_event *user, bool visible)
 {
-	int ret;
-	const struct cred *old_cred;
-	struct cred *cred;
-
-	cred = prepare_creds();
-
+	CLASS(prepare_creds, cred)();
 	if (!cred)
 		return -ENOMEM;
 
@@ -1315,17 +1464,12 @@ static int user_event_set_call_visible(struct user_event *user, bool visible)
 	 */
 	cred->fsuid = GLOBAL_ROOT_UID;
 
-	old_cred = override_creds(cred);
+	scoped_with_creds(cred) {
+		if (visible)
+			return trace_add_event_call(&user->call);
 
-	if (visible)
-		ret = trace_add_event_call(&user->call);
-	else
-		ret = trace_remove_event_call(&user->call);
-
-	revert_creds(old_cred);
-	put_cred(cred);
-
-	return ret;
+		return trace_remove_event_call(&user->call);
+	}
 }
 
 static int destroy_user_event(struct user_event *user)
@@ -1346,6 +1490,11 @@ static int destroy_user_event(struct user_event *user)
 	hash_del(&user->node);
 
 	user_event_destroy_validators(user);
+
+	/* If we have different names, both must be freed */
+	if (EVENT_NAME(user) != EVENT_TP_NAME(user))
+		kfree(EVENT_TP_NAME(user));
+
 	kfree(user->call.print_fmt);
 	kfree(EVENT_NAME(user));
 	kfree(user);
@@ -1359,18 +1508,35 @@ static int destroy_user_event(struct user_event *user)
 }
 
 static struct user_event *find_user_event(struct user_event_group *group,
-					  char *name, u32 *outkey)
+					  char *name, int argc, const char **argv,
+					  u32 flags, u32 *outkey)
 {
 	struct user_event *user;
 	u32 key = user_event_key(name);
 
 	*outkey = key;
 
-	hash_for_each_possible(group->register_table, user, node, key)
-		if (!strcmp(EVENT_NAME(user), name)) {
-			refcount_inc(&user->refcnt);
-			return user;
-		}
+	hash_for_each_possible(group->register_table, user, node, key) {
+		/*
+		 * Single-format events shouldn't return multi-format
+		 * events. Callers expect the underlying tracepoint to match
+		 * the name exactly in these cases. Only check like-formats.
+		 */
+		if (EVENT_MULTI_FORMAT(flags) != EVENT_MULTI_FORMAT(user->reg_flags))
+			continue;
+
+		if (strcmp(EVENT_NAME(user), name))
+			continue;
+
+		if (user_fields_match(user, argc, argv))
+			return user_event_get(user);
+
+		/* Scan others if this is a multi-format event */
+		if (EVENT_MULTI_FORMAT(flags))
+			continue;
+
+		return ERR_PTR(-EADDRINUSE);
+	}
 
 	return NULL;
 }
@@ -1432,7 +1598,7 @@ static void user_event_ftrace(struct user_event *user, struct iov_iter *i,
 	if (unlikely(!entry))
 		return;
 
-	if (unlikely(!copy_nofault(entry + 1, i->count, i)))
+	if (unlikely(i->count != 0 && !copy_nofault(entry + 1, i->count, i)))
 		goto discard;
 
 	if (!list_empty(&user->validators) &&
@@ -1473,7 +1639,7 @@ static void user_event_perf(struct user_event *user, struct iov_iter *i,
 
 		perf_fetch_caller_regs(regs);
 
-		if (unlikely(!copy_nofault(perf_entry + 1, i->count, i)))
+		if (unlikely(i->count != 0 && !copy_nofault(perf_entry + 1, i->count, i)))
 			goto discard;
 
 		if (!list_empty(&user->validators) &&
@@ -1500,7 +1666,7 @@ static void update_enable_bit_for(struct user_event *user)
 	struct tracepoint *tp = &user->tracepoint;
 	char status = 0;
 
-	if (atomic_read(&tp->key.enabled) > 0) {
+	if (static_key_enabled(&tp->key)) {
 		struct tracepoint_func *probe_func_ptr;
 		user_event_func_t probe_func;
 
@@ -1584,12 +1750,12 @@ static int user_event_reg(struct trace_event_call *call,
 
 	return ret;
 inc:
-	refcount_inc(&user->refcnt);
+	user_event_get(user);
 	update_enable_bit_for(user);
 	return 0;
 dec:
 	update_enable_bit_for(user);
-	refcount_dec(&user->refcnt);
+	user_event_put(user, true);
 	return 0;
 }
 
@@ -1620,10 +1786,11 @@ static int user_event_create(const char *raw_command)
 
 	mutex_lock(&group->reg_mutex);
 
-	ret = user_event_parse_cmd(group, name, &user);
+	/* Dyn events persist, otherwise they would cleanup immediately */
+	ret = user_event_parse_cmd(group, name, &user, USER_EVENT_REG_PERSIST);
 
 	if (!ret)
-		refcount_dec(&user->refcnt);
+		user_event_put(user, false);
 
 	mutex_unlock(&group->reg_mutex);
 
@@ -1636,7 +1803,7 @@ static int user_event_create(const char *raw_command)
 static int user_event_show(struct seq_file *m, struct dyn_event *ev)
 {
 	struct user_event *user = container_of(ev, struct user_event, devent);
-	struct ftrace_event_field *field, *next;
+	struct ftrace_event_field *field;
 	struct list_head *head;
 	int depth = 0;
 
@@ -1644,7 +1811,7 @@ static int user_event_show(struct seq_file *m, struct dyn_event *ev)
 
 	head = trace_get_fields(&user->call);
 
-	list_for_each_entry_safe_reverse(field, next, head, link) {
+	list_for_each_entry_reverse(field, head, link) {
 		if (depth == 0)
 			seq_puts(m, " ");
 		else
@@ -1676,6 +1843,9 @@ static int user_event_free(struct dyn_event *ev)
 
 	if (!user_event_last_ref(user))
 		return -EBUSY;
+
+	if (!user_event_capable(user->reg_flags))
+		return -EPERM;
 
 	return destroy_user_event(user);
 }
@@ -1720,13 +1890,17 @@ out:
 static bool user_fields_match(struct user_event *user, int argc,
 			      const char **argv)
 {
-	struct ftrace_event_field *field, *next;
+	struct ftrace_event_field *field;
 	struct list_head *head = &user->fields;
 	int i = 0;
 
-	list_for_each_entry_safe_reverse(field, next, head, link)
+	if (argc == 0)
+		return list_empty(head);
+
+	list_for_each_entry_reverse(field, head, link) {
 		if (!user_field_match(field, argc, argv, &i))
 			return false;
+	}
 
 	if (i != argc)
 		return false;
@@ -1740,10 +1914,14 @@ static bool user_event_match(const char *system, const char *event,
 	struct user_event *user = container_of(ev, struct user_event, devent);
 	bool match;
 
-	match = strcmp(EVENT_NAME(user), event) == 0 &&
-		(!system || strcmp(system, USER_EVENTS_SYSTEM) == 0);
+	match = strcmp(EVENT_NAME(user), event) == 0;
 
-	if (match && argc > 0)
+	if (match && system) {
+		match = strcmp(system, user->group->system_name) == 0 ||
+			strcmp(system, user->group->system_multi_name) == 0;
+	}
+
+	if (match)
 		match = user_fields_match(user, argc, argv);
 
 	return match;
@@ -1774,6 +1952,107 @@ static int user_event_trace_register(struct user_event *user)
 	return ret;
 }
 
+static int user_event_set_tp_name(struct user_event *user)
+{
+	lockdep_assert_held(&user->group->reg_mutex);
+
+	if (EVENT_MULTI_FORMAT(user->reg_flags)) {
+		char *multi_name;
+
+		multi_name = kasprintf(GFP_KERNEL_ACCOUNT, "%s.%llx",
+				       user->reg_name, user->group->multi_id);
+
+		if (!multi_name)
+			return -ENOMEM;
+
+		user->call.name = multi_name;
+		user->tracepoint.name = multi_name;
+
+		/* Inc to ensure unique multi-event name next time */
+		user->group->multi_id++;
+	} else {
+		/* Non Multi-format uses register name */
+		user->call.name = user->reg_name;
+		user->tracepoint.name = user->reg_name;
+	}
+
+	return 0;
+}
+
+/*
+ * Counts how many ';' without a trailing space are in the args.
+ */
+static int count_semis_no_space(char *args)
+{
+	int count = 0;
+
+	while ((args = strchr(args, ';'))) {
+		args++;
+
+		if (!isspace(*args))
+			count++;
+	}
+
+	return count;
+}
+
+/*
+ * Copies the arguments while ensuring all ';' have a trailing space.
+ */
+static char *insert_space_after_semis(char *args, int count)
+{
+	char *fixed, *pos;
+	int len;
+
+	len = strlen(args) + count;
+	fixed = kmalloc(len + 1, GFP_KERNEL);
+
+	if (!fixed)
+		return NULL;
+
+	pos = fixed;
+
+	/* Insert a space after ';' if there is no trailing space. */
+	while (*args) {
+		*pos = *args++;
+
+		if (*pos++ == ';' && !isspace(*args))
+			*pos++ = ' ';
+	}
+
+	*pos = '\0';
+
+	return fixed;
+}
+
+static char **user_event_argv_split(char *args, int *argc)
+{
+	char **split;
+	char *fixed;
+	int count;
+
+	/* Count how many ';' without a trailing space */
+	count = count_semis_no_space(args);
+
+	/* No fixup is required */
+	if (!count)
+		return argv_split(GFP_KERNEL, args, argc);
+
+	/* We must fixup 'field;field' to 'field; field' */
+	fixed = insert_space_after_semis(args, count);
+
+	if (!fixed)
+		return NULL;
+
+	/* We do a normal split afterwards */
+	split = argv_split(GFP_KERNEL, fixed, argc);
+
+	/* We can free since argv_split makes a copy */
+	kfree(fixed);
+
+	return split;
+}
+
 /*
  * Parses the event name, arguments and flags then registers if successful.
  * The name buffer lifetime is owned by this method for success cases only.
@@ -1781,16 +2060,39 @@ static int user_event_trace_register(struct user_event *user)
  */
 static int user_event_parse(struct user_event_group *group, char *name,
 			    char *args, char *flags,
-			    struct user_event **newuser)
+			    struct user_event **newuser, int reg_flags)
 {
+	struct user_event *user;
+	char **argv = NULL;
+	int argc = 0;
 	int ret;
 	u32 key;
-	struct user_event *user;
+
+	/* Currently don't support any text based flags */
+	if (flags != NULL)
+		return -EINVAL;
+
+	if (!user_event_capable(reg_flags))
+		return -EPERM;
+
+	if (args) {
+		argv = user_event_argv_split(args, &argc);
+
+		if (!argv)
+			return -ENOMEM;
+	}
 
 	/* Prevent dyn_event from racing */
 	mutex_lock(&event_mutex);
-	user = find_user_event(group, name, &key);
+	user = find_user_event(group, name, argc, (const char **)argv,
+			       reg_flags, &key);
 	mutex_unlock(&event_mutex);
+
+	if (argv)
+		argv_free(argv);
+
+	if (IS_ERR(user))
+		return PTR_ERR(user);
 
 	if (user) {
 		*newuser = user;
@@ -1799,10 +2101,11 @@ static int user_event_parse(struct user_event_group *group, char *name,
 		 * Caller only worries about failure cases for freeing.
 		 */
 		kfree(name);
+
 		return 0;
 	}
 
-	user = kzalloc(sizeof(*user), GFP_KERNEL_ACCOUNT);
+	user = kzalloc_obj(*user, GFP_KERNEL_ACCOUNT);
 
 	if (!user)
 		return -ENOMEM;
@@ -1812,7 +2115,13 @@ static int user_event_parse(struct user_event_group *group, char *name,
 	INIT_LIST_HEAD(&user->validators);
 
 	user->group = group;
-	user->tracepoint.name = name;
+	user->reg_name = name;
+	user->reg_flags = reg_flags;
+
+	ret = user_event_set_tp_name(user);
+
+	if (ret)
+		goto put_user;
 
 	ret = user_event_parse_fields(user, args);
 
@@ -1826,11 +2135,14 @@ static int user_event_parse(struct user_event_group *group, char *name,
 
 	user->call.data = user;
 	user->call.class = &user->class;
-	user->call.name = name;
 	user->call.flags = TRACE_EVENT_FL_TRACEPOINT;
 	user->call.tp = &user->tracepoint;
 	user->call.event.funcs = &user_event_funcs;
-	user->class.system = group->system_name;
+
+	if (EVENT_MULTI_FORMAT(user->reg_flags))
+		user->class.system = group->system_multi_name;
+	else
+		user->class.system = group->system_name;
 
 	user->class.fields_array = user_event_fields_array;
 	user->class.get_fields = user_event_get_fields;
@@ -1852,8 +2164,13 @@ static int user_event_parse(struct user_event_group *group, char *name,
 	if (ret)
 		goto put_user_lock;
 
-	/* Ensure we track self ref and caller ref (2) */
-	refcount_set(&user->refcnt, 2);
+	if (user->reg_flags & USER_EVENT_REG_PERSIST) {
+		/* Ensure we track self ref and caller ref (2) */
+		refcount_set(&user->refcnt, 2);
+	} else {
+		/* Ensure we track only caller ref (1) */
+		refcount_set(&user->refcnt, 1);
+	}
 
 	dyn_event_init(&user->devent, &user_event_dops);
 	dyn_event_add(&user->devent, &user->call);
@@ -1870,27 +2187,43 @@ put_user:
 	user_event_destroy_fields(user);
 	user_event_destroy_validators(user);
 	kfree(user->call.print_fmt);
+
+	/* Caller frees reg_name on error, but not multi-name */
+	if (EVENT_NAME(user) != EVENT_TP_NAME(user))
+		kfree(EVENT_TP_NAME(user));
+
 	kfree(user);
 	return ret;
 }
 
 /*
- * Deletes a previously created event if it is no longer being used.
+ * Deletes previously created events if they are no longer being used.
  */
 static int delete_user_event(struct user_event_group *group, char *name)
 {
-	u32 key;
-	struct user_event *user = find_user_event(group, name, &key);
+	struct user_event *user;
+	struct hlist_node *tmp;
+	u32 key = user_event_key(name);
+	int ret = -ENOENT;
 
-	if (!user)
-		return -ENOENT;
+	/* Attempt to delete all event(s) with the name passed in */
+	hash_for_each_possible_safe(group->register_table, user, tmp, node, key) {
+		if (strcmp(EVENT_NAME(user), name))
+			continue;
 
-	refcount_dec(&user->refcnt);
+		if (!user_event_last_ref(user))
+			return -EBUSY;
 
-	if (!user_event_last_ref(user))
-		return -EBUSY;
+		if (!user_event_capable(user->reg_flags))
+			return -EPERM;
 
-	return destroy_user_event(user);
+		ret = destroy_user_event(user);
+
+		if (ret)
+			goto out;
+	}
+out:
+	return ret;
 }
 
 /*
@@ -1937,7 +2270,7 @@ static ssize_t user_events_write_core(struct file *file, struct iov_iter *i)
 	 * It's possible key.enabled disables after this check, however
 	 * we don't mind if a few events are included in this condition.
 	 */
-	if (likely(atomic_read(&tp->key.enabled) > 0)) {
+	if (likely(static_key_enabled(&tp->key))) {
 		struct tracepoint_func *probe_func_ptr;
 		user_event_func_t probe_func;
 		struct iov_iter copy;
@@ -1966,7 +2299,8 @@ static ssize_t user_events_write_core(struct file *file, struct iov_iter *i)
 
 		if (unlikely(faulted))
 			return -EFAULT;
-	}
+	} else
+		return -EBADF;
 
 	return ret;
 }
@@ -1981,7 +2315,7 @@ static int user_events_open(struct inode *node, struct file *file)
 	if (!group)
 		return -ENOENT;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL_ACCOUNT);
+	info = kzalloc_obj(*info, GFP_KERNEL_ACCOUNT);
 
 	if (!info)
 		return -ENOMEM;
@@ -1996,14 +2330,12 @@ static int user_events_open(struct inode *node, struct file *file)
 static ssize_t user_events_write(struct file *file, const char __user *ubuf,
 				 size_t count, loff_t *ppos)
 {
-	struct iovec iov;
 	struct iov_iter i;
 
 	if (unlikely(*ppos != 0))
 		return -EFAULT;
 
-	if (unlikely(import_single_range(ITER_SOURCE, (char __user *)ubuf,
-					 count, &iov, &i)))
+	if (unlikely(import_ubuf(ITER_SOURCE, (char __user *)ubuf, count, &i)))
 		return -EFAULT;
 
 	return user_events_write_core(file, &i);
@@ -2044,9 +2376,7 @@ static int user_events_ref_add(struct user_event_file_info *info,
 	for (i = 0; i < count; ++i)
 		new_refs->events[i] = refs->events[i];
 
-	new_refs->events[i] = user;
-
-	refcount_inc(&user->refcnt);
+	new_refs->events[i] = user_event_get(user);
 
 	rcu_assign_pointer(info->refs, new_refs);
 
@@ -2077,8 +2407,8 @@ static long user_reg_get(struct user_reg __user *ureg, struct user_reg *kreg)
 	if (ret)
 		return ret;
 
-	/* Ensure no flags, since we don't support any yet */
-	if (kreg->flags != 0)
+	/* Ensure only valid flags */
+	if (kreg->flags & ~(USER_EVENT_REG_MAX-1))
 		return -EINVAL;
 
 	/* Ensure supported size */
@@ -2135,7 +2465,7 @@ static long user_events_ioctl_reg(struct user_event_file_info *info,
 	/*
 	 * Prevent users from using the same address and bit multiple times
 	 * within the same mm address space. This can cause unexpected behavior
-	 * for user processes that is far easier to debug if this is explictly
+	 * for user processes that is far easier to debug if this is explicitly
 	 * an error upon registering.
 	 */
 	if (current_user_event_enabler_exists((unsigned long)reg.enable_addr,
@@ -2150,7 +2480,7 @@ static long user_events_ioctl_reg(struct user_event_file_info *info,
 		return ret;
 	}
 
-	ret = user_event_parse_cmd(info->group, name, &user);
+	ret = user_event_parse_cmd(info->group, name, &user, reg.flags);
 
 	if (ret) {
 		kfree(name);
@@ -2160,7 +2490,7 @@ static long user_events_ioctl_reg(struct user_event_file_info *info,
 	ret = user_events_ref_add(info, user);
 
 	/* No longer need parse ref, ref_add either worked or not */
-	refcount_dec(&user->refcnt);
+	user_event_put(user, false);
 
 	/* Positive number is index and valid */
 	if (ret < 0)
@@ -2244,7 +2574,8 @@ static long user_unreg_get(struct user_unreg __user *ureg,
 }
 
 static int user_event_mm_clear_bit(struct user_event_mm *user_mm,
-				   unsigned long uaddr, unsigned char bit)
+				   unsigned long uaddr, unsigned char bit,
+				   unsigned long flags)
 {
 	struct user_event_enabler enabler;
 	int result;
@@ -2252,7 +2583,7 @@ static int user_event_mm_clear_bit(struct user_event_mm *user_mm,
 
 	memset(&enabler, 0, sizeof(enabler));
 	enabler.addr = uaddr;
-	enabler.values = bit;
+	enabler.values = bit | flags;
 retry:
 	/* Prevents state changes from racing with new enablers */
 	mutex_lock(&event_mutex);
@@ -2282,6 +2613,7 @@ static long user_events_ioctl_unreg(unsigned long uarg)
 	struct user_event_mm *mm = current->user_event_mm;
 	struct user_event_enabler *enabler, *next;
 	struct user_unreg reg;
+	unsigned long flags;
 	long ret;
 
 	ret = user_unreg_get(ureg, &reg);
@@ -2292,6 +2624,7 @@ static long user_events_ioctl_unreg(unsigned long uarg)
 	if (!mm)
 		return -ENOENT;
 
+	flags = 0;
 	ret = -ENOENT;
 
 	/*
@@ -2308,8 +2641,11 @@ static long user_events_ioctl_unreg(unsigned long uarg)
 		    ENABLE_BIT(enabler) == reg.disable_bit) {
 			set_bit(ENABLE_VAL_FREEING_BIT, ENABLE_BITOPS(enabler));
 
+			/* We must keep compat flags for the clear */
+			flags |= enabler->values & ENABLE_VAL_COMPAT_MASK;
+
 			if (!test_bit(ENABLE_VAL_FAULTING_BIT, ENABLE_BITOPS(enabler)))
-				user_event_enabler_destroy(enabler);
+				user_event_enabler_destroy(enabler, true);
 
 			/* Removed at least one */
 			ret = 0;
@@ -2321,7 +2657,7 @@ static long user_events_ioctl_unreg(unsigned long uarg)
 	/* Ensure bit is now cleared for user, regardless of event status */
 	if (!ret)
 		ret = user_event_mm_clear_bit(mm, reg.disable_addr,
-					      reg.disable_bit);
+					      reg.disable_bit, flags);
 
 	return ret;
 }
@@ -2367,7 +2703,6 @@ static int user_events_release(struct inode *node, struct file *file)
 	struct user_event_file_info *info = file->private_data;
 	struct user_event_group *group;
 	struct user_event_refs *refs;
-	struct user_event *user;
 	int i;
 
 	if (!info)
@@ -2391,12 +2726,9 @@ static int user_events_release(struct inode *node, struct file *file)
 	 * The underlying user_events are ref counted, and cannot be freed.
 	 * After this decrement, the user_events may be freed elsewhere.
 	 */
-	for (i = 0; i < refs->count; ++i) {
-		user = refs->events[i];
+	for (i = 0; i < refs->count; ++i)
+		user_event_put(refs->events[i], false);
 
-		if (user)
-			refcount_dec(&user->refcnt);
-	}
 out:
 	file->private_data = NULL;
 
@@ -2449,13 +2781,10 @@ static int user_seq_show(struct seq_file *m, void *p)
 	hash_for_each(group->register_table, i, user, node) {
 		status = user->status;
 
-		seq_printf(m, "%s", EVENT_NAME(user));
-
-		if (status != 0)
-			seq_puts(m, " #");
+		seq_printf(m, "%s", EVENT_TP_NAME(user));
 
 		if (status != 0) {
-			seq_puts(m, " Used by");
+			seq_puts(m, " # Used by");
 			if (status & EVENT_STATUS_FTRACE)
 				seq_puts(m, " ftrace");
 			if (status & EVENT_STATUS_PERF)
@@ -2543,7 +2872,7 @@ err:
 	return -ENODEV;
 }
 
-static int set_max_user_events_sysctl(struct ctl_table *table, int write,
+static int set_max_user_events_sysctl(const struct ctl_table *table, int write,
 				      void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -2557,7 +2886,7 @@ static int set_max_user_events_sysctl(struct ctl_table *table, int write,
 	return ret;
 }
 
-static struct ctl_table user_event_sysctls[] = {
+static const struct ctl_table user_event_sysctls[] = {
 	{
 		.procname	= "user_events_max",
 		.data		= &max_user_events,
@@ -2565,7 +2894,6 @@ static struct ctl_table user_event_sysctls[] = {
 		.mode		= 0644,
 		.proc_handler	= set_max_user_events_sysctl,
 	},
-	{}
 };
 
 static int __init trace_events_user_init(void)
@@ -2577,7 +2905,7 @@ static int __init trace_events_user_init(void)
 	if (!fault_cache)
 		return -ENOMEM;
 
-	init_group = user_event_group_create(&init_user_ns);
+	init_group = user_event_group_create();
 
 	if (!init_group) {
 		kmem_cache_destroy(fault_cache);

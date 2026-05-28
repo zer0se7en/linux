@@ -3,9 +3,20 @@
 #define __PERF_SYMBOL_CONF 1
 
 #include <stdbool.h>
+#include <linux/bitmap.h>
+#include "perf.h"
 
 struct strlist;
 struct intlist;
+
+enum a2l_style {
+	A2L_STYLE_UNKNOWN = 0,
+	A2L_STYLE_LIBDW,
+	A2L_STYLE_LLVM,
+	A2L_STYLE_LIBBFD,
+	A2L_STYLE_CMD,
+};
+#define MAX_A2L_STYLE (A2L_STYLE_CMD + 1)
 
 struct symbol_conf {
 	bool		nanosecs;
@@ -18,7 +29,6 @@ struct symbol_conf {
 			show_kernel_path,
 			use_modules,
 			allow_aliases,
-			sort_by_name,
 			show_nr_samples,
 			show_total_period,
 			use_callchain,
@@ -41,9 +51,16 @@ struct symbol_conf {
 			report_block,
 			report_individual_block,
 			inline_name,
-			disable_add2line_warn,
-			buildid_mmap2,
-			guest_code;
+			addr2line_disable_warn,
+			no_buildid_mmap2,
+			guest_code,
+			lazy_load_kernel_maps,
+			keep_exited_threads,
+			annotate_data_member,
+			annotate_data_sample,
+			skip_empty,
+			enable_latency,
+			prefer_latency;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,
@@ -58,9 +75,12 @@ struct symbol_conf {
 			*pid_list_str,
 			*tid_list_str,
 			*sym_list_str,
+			*parallelism_list_str,
 			*col_width_list_str,
 			*bt_stop_list_str;
-	char		*addr2line_path;
+	const char		*addr2line_path;
+	enum a2l_style	addr2line_style[MAX_A2L_STYLE];
+	int             addr2line_timeout_ms;
 	unsigned long	time_quantum;
        struct strlist	*dso_list,
 			*comm_list,
@@ -74,10 +94,12 @@ struct symbol_conf {
 			*tid_list,
 			*addr_list;
 	const char	*symfs;
+	bool		symfs_layout_flat;
 	int		res_sample;
 	int		pad_output_len_dso;
 	int		group_sort_idx;
 	int		addr_range;
+	DECLARE_BITMAP(parallelism_filter, MAX_NR_CPUS + 1);
 };
 
 extern struct symbol_conf symbol_conf;

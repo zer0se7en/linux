@@ -422,7 +422,7 @@ static int max44009_write_event_config(struct iio_dev *indio_dev,
 				       const struct iio_chan_spec *chan,
 				       enum iio_event_type type,
 				       enum iio_event_direction dir,
-				       int state)
+				       bool state)
 {
 	struct max44009_data *data = iio_priv(indio_dev);
 	int ret;
@@ -534,7 +534,7 @@ static const struct of_device_id max44009_of_match[] = {
 MODULE_DEVICE_TABLE(of, max44009_of_match);
 
 static const struct i2c_device_id max44009_id[] = {
-	{ "max44009", 0 },
+	{ "max44009" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max44009_id);
@@ -544,7 +544,7 @@ static struct i2c_driver max44009_driver = {
 		.name = MAX44009_DRV_NAME,
 		.of_match_table = max44009_of_match,
 	},
-	.probe_new = max44009_probe,
+	.probe = max44009_probe,
 	.id_table = max44009_id,
 };
 module_i2c_driver(max44009_driver);

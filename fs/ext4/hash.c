@@ -268,7 +268,7 @@ static int __ext4fs_dirhash(const struct inode *dir, const char *name, int len,
 			combined_hash = fscrypt_fname_siphash(dir, &qname);
 		} else {
 			ext4_warning_inode(dir, "Siphash requires key");
-			return -1;
+			return -EINVAL;
 		}
 
 		hash = (__u32)(combined_hash >> 32);
@@ -300,9 +300,9 @@ int ext4fs_dirhash(const struct inode *dir, const char *name, int len,
 	unsigned char *buff;
 	struct qstr qstr = {.name = name, .len = len };
 
-	if (len && IS_CASEFOLDED(dir) && um &&
+	if (len && IS_CASEFOLDED(dir) &&
 	   (!IS_ENCRYPTED(dir) || fscrypt_has_encryption_key(dir))) {
-		buff = kzalloc(sizeof(char) * PATH_MAX, GFP_KERNEL);
+		buff = kzalloc(PATH_MAX, GFP_KERNEL);
 		if (!buff)
 			return -ENOMEM;
 

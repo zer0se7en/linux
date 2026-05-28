@@ -21,8 +21,8 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/of_device.h>
-#include <linux/of_irq.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 
@@ -309,7 +309,7 @@ static void iproc_gpio_irq_print_chip(struct irq_data *d, struct seq_file *p)
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
 	struct iproc_gpio *chip = gpiochip_get_data(gc);
 
-	seq_printf(p, dev_name(chip->dev));
+	seq_puts(p, dev_name(chip->dev));
 }
 
 static const struct irq_chip iproc_gpio_irq_chip = {
@@ -330,24 +330,22 @@ static const struct irq_chip iproc_gpio_irq_chip = {
 static int iproc_gpio_request(struct gpio_chip *gc, unsigned offset)
 {
 	struct iproc_gpio *chip = gpiochip_get_data(gc);
-	unsigned gpio = gc->base + offset;
 
 	/* not all Iproc GPIO pins can be muxed individually */
 	if (!chip->pinmux_is_supported)
 		return 0;
 
-	return pinctrl_gpio_request(gpio);
+	return pinctrl_gpio_request(gc, offset);
 }
 
 static void iproc_gpio_free(struct gpio_chip *gc, unsigned offset)
 {
 	struct iproc_gpio *chip = gpiochip_get_data(gc);
-	unsigned gpio = gc->base + offset;
 
 	if (!chip->pinmux_is_supported)
 		return;
 
-	pinctrl_gpio_free(gpio);
+	pinctrl_gpio_free(gc, offset);
 }
 
 static int iproc_gpio_direction_input(struct gpio_chip *gc, unsigned gpio)
@@ -392,7 +390,7 @@ static int iproc_gpio_get_direction(struct gpio_chip *gc, unsigned int gpio)
 	return GPIO_LINE_DIRECTION_IN;
 }
 
-static void iproc_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
+static int iproc_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	struct iproc_gpio *chip = gpiochip_get_data(gc);
 	unsigned long flags;
@@ -402,6 +400,8 @@ static void iproc_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
 	raw_spin_unlock_irqrestore(&chip->lock, flags);
 
 	dev_dbg(chip->dev, "gpio:%u set, value:%d\n", gpio, val);
+
+	return 0;
 }
 
 static int iproc_gpio_get(struct gpio_chip *gc, unsigned gpio)
@@ -891,10 +891,8 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 	}
 
 	ret = gpiochip_add_data(gc, chip);
-	if (ret < 0) {
-		dev_err(dev, "unable to add GPIO chip\n");
-		return ret;
-	}
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "unable to add GPIO chip\n");
 
 	if (!no_pinconf) {
 		ret = iproc_gpio_register_pinconf(chip);

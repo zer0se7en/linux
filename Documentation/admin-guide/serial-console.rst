@@ -59,7 +59,7 @@ times. In this case, there are the following two rules:
    the hardware is not available.
 
 The result might be surprising. For example, the following two command
-lines have the same result:
+lines have the same result::
 
 	console=ttyS1,9600 console=tty0 console=tty1
 	console=tty0 console=ttyS1,9600 console=tty1
@@ -78,7 +78,9 @@ If no console device is specified, the first device found capable of
 acting as a system console will be used. At this time, the system
 first looks for a VGA card and then for a serial port. So if you don't
 have a VGA card in your system the first serial port will automatically
-become the console.
+become the console, unless the kernel is configured with the
+CONFIG_NULL_TTY_DEFAULT_CONSOLE option, then it will default to using the
+ttynull device.
 
 You will need to create a new device to use ``/dev/console``. The official
 ``/dev/console`` is now character device 5,1.

@@ -80,7 +80,7 @@ static void populate_error_injection_list(struct error_injection_entry *start,
 			continue;
 		}
 
-		ent = kmalloc(sizeof(*ent), GFP_KERNEL);
+		ent = kmalloc_obj(*ent);
 		if (!ent)
 			break;
 		ent->start_addr = entry;
@@ -217,8 +217,6 @@ static int __init ei_debugfs_init(void)
 	struct dentry *dir, *file;
 
 	dir = debugfs_create_dir("error_injection", NULL);
-	if (!dir)
-		return -ENOMEM;
 
 	file = debugfs_create_file("list", 0444, dir, NULL, &ei_fops);
 	if (!file) {

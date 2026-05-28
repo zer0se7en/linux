@@ -1,7 +1,5 @@
 .. SPDX-License-Identifier: GPL-2.0
 
-.. _maintainer_handbooks_main:
-
 Subsystem and maintainer tree specific development process notes
 ================================================================
 
@@ -15,5 +13,8 @@ Contents:
    :numbered:
    :maxdepth: 2
 
-   maintainer-tip
    maintainer-netdev
+   maintainer-soc
+   maintainer-soc-clean-dts
+   maintainer-tip
+   maintainer-kvm-x86

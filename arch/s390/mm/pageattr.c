@@ -3,7 +3,9 @@
  * Copyright IBM Corp. 2011
  * Author(s): Jan Glauber <jang@linux.vnet.ibm.com>
  */
+#include <linux/cpufeature.h>
 #include <linux/hugetlb.h>
+#include <linux/proc_fs.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <asm/cacheflush.h>
@@ -11,21 +13,15 @@
 #include <asm/pgalloc.h>
 #include <asm/kfence.h>
 #include <asm/page.h>
+#include <asm/asm.h>
 #include <asm/set_memory.h>
-
-static inline unsigned long sske_frame(unsigned long addr, unsigned char skey)
-{
-	asm volatile(".insn rrf,0xb22b0000,%[skey],%[addr],1,0"
-		     : [addr] "+a" (addr) : [skey] "d" (skey));
-	return addr;
-}
 
 void __storage_key_init_range(unsigned long start, unsigned long end)
 {
 	unsigned long boundary, size;
 
 	while (start < end) {
-		if (MACHINE_HAS_EDAT1) {
+		if (cpu_has_edat1()) {
 			/* set storage keys for a 1MB frame */
 			size = 1UL << 20;
 			boundary = (start + size) & ~(size - 1);
@@ -61,7 +57,7 @@ static void pgt_set(unsigned long *old, unsigned long new, unsigned long addr,
 	unsigned long *table, mask;
 
 	mask = 0;
-	if (MACHINE_HAS_EDAT2) {
+	if (cpu_has_edat2()) {
 		switch (dtt) {
 		case CRDTE_DTT_REGION3:
 			mask = ~(PTRS_PER_PUD * sizeof(pud_t) - 1);
@@ -74,11 +70,9 @@ static void pgt_set(unsigned long *old, unsigned long new, unsigned long addr,
 			break;
 		}
 		table = (unsigned long *)((unsigned long)old & mask);
-		crdte(*old, new, table, dtt, addr, S390_lowcore.kernel_asce);
-	} else if (MACHINE_HAS_IDTE) {
-		cspg(old, *old, new);
+		crdte(*old, new, table, dtt, addr, get_lowcore()->kernel_asce.val);
 	} else {
-		csp((unsigned int *)old + 1, *old, new);
+		cspg(old, *old, new);
 	}
 }
 
@@ -97,7 +91,7 @@ static int walk_pte_level(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		if (flags & SET_MEMORY_RO)
 			new = pte_wrprotect(new);
 		else if (flags & SET_MEMORY_RW)
-			new = pte_mkwrite(pte_mkdirty(new));
+			new = pte_mkwrite_novma(pte_mkdirty(new));
 		if (flags & SET_MEMORY_NX)
 			new = set_pte_bit(new, __pgprot(_PAGE_NOEXEC));
 		else if (flags & SET_MEMORY_X)
@@ -107,8 +101,6 @@ static int walk_pte_level(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		} else if (flags & SET_MEMORY_DEF) {
 			new = __pte(pte_val(new) & PAGE_MASK);
 			new = set_pte_bit(new, PAGE_KERNEL);
-			if (!MACHINE_HAS_NX)
-				new = clear_pte_bit(new, __pgprot(_PAGE_NOEXEC));
 		}
 		pgt_set((unsigned long *)ptep, pte_val(new), addr, CRDTE_DTT_PAGE);
 		ptep++;
@@ -155,7 +147,7 @@ static void modify_pmd_page(pmd_t *pmdp, unsigned long addr,
 	if (flags & SET_MEMORY_RO)
 		new = pmd_wrprotect(new);
 	else if (flags & SET_MEMORY_RW)
-		new = pmd_mkwrite(pmd_mkdirty(new));
+		new = pmd_mkwrite_novma(pmd_mkdirty(new));
 	if (flags & SET_MEMORY_NX)
 		new = set_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_NOEXEC));
 	else if (flags & SET_MEMORY_X)
@@ -165,8 +157,6 @@ static void modify_pmd_page(pmd_t *pmdp, unsigned long addr,
 	} else if (flags & SET_MEMORY_DEF) {
 		new = __pmd(pmd_val(new) & PMD_MASK);
 		new = set_pmd_bit(new, SEGMENT_KERNEL);
-		if (!MACHINE_HAS_NX)
-			new = clear_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_NOEXEC));
 	}
 	pgt_set((unsigned long *)pmdp, pmd_val(new), addr, CRDTE_DTT_SEGMENT);
 }
@@ -184,7 +174,7 @@ static int walk_pmd_level(pud_t *pudp, unsigned long addr, unsigned long end,
 		if (pmd_none(*pmdp))
 			return -EINVAL;
 		next = pmd_addr_end(addr, end);
-		if (pmd_large(*pmdp)) {
+		if (pmd_leaf(*pmdp)) {
 			need_split  = !!(flags & SET_MEMORY_4K);
 			need_split |= !!(addr & ~PMD_MASK);
 			need_split |= !!(addr + PMD_SIZE > next);
@@ -207,7 +197,7 @@ static int walk_pmd_level(pud_t *pudp, unsigned long addr, unsigned long end,
 	return rc;
 }
 
-static int split_pud_page(pud_t *pudp, unsigned long addr)
+int split_pud_page(pud_t *pudp, unsigned long addr)
 {
 	unsigned long pmd_addr, prot;
 	pmd_t *pm_dir, *pmdp;
@@ -254,8 +244,6 @@ static void modify_pud_page(pud_t *pudp, unsigned long addr,
 	} else if (flags & SET_MEMORY_DEF) {
 		new = __pud(pud_val(new) & PUD_MASK);
 		new = set_pud_bit(new, REGION3_KERNEL);
-		if (!MACHINE_HAS_NX)
-			new = clear_pud_bit(new, __pgprot(_REGION_ENTRY_NOEXEC));
 	}
 	pgt_set((unsigned long *)pudp, pud_val(new), addr, CRDTE_DTT_REGION3);
 }
@@ -273,7 +261,7 @@ static int walk_pud_level(p4d_t *p4d, unsigned long addr, unsigned long end,
 		if (pud_none(*pudp))
 			return -EINVAL;
 		next = pud_addr_end(addr, end);
-		if (pud_large(*pudp)) {
+		if (pud_leaf(*pudp)) {
 			need_split  = !!(flags & SET_MEMORY_4K);
 			need_split |= !!(addr & ~PUD_MASK);
 			need_split |= !!(addr + PUD_SIZE > next);
@@ -372,12 +360,12 @@ static int change_page_attr_alias(unsigned long addr, unsigned long end,
 	return rc;
 }
 
-int __set_memory(unsigned long addr, int numpages, unsigned long flags)
+int __set_memory(unsigned long addr, unsigned long numpages, unsigned long flags)
 {
 	unsigned long end;
 	int rc;
 
-	if (!MACHINE_HAS_NX)
+	if (!cpu_has_nx())
 		flags &= ~(SET_MEMORY_NX | SET_MEMORY_X);
 	if (!flags)
 		return 0;
@@ -403,6 +391,33 @@ int set_direct_map_invalid_noflush(struct page *page)
 int set_direct_map_default_noflush(struct page *page)
 {
 	return __set_memory((unsigned long)page_to_virt(page), 1, SET_MEMORY_DEF);
+}
+
+int set_direct_map_valid_noflush(struct page *page, unsigned nr, bool valid)
+{
+	unsigned long flags;
+
+	if (valid)
+		flags = SET_MEMORY_DEF;
+	else
+		flags = SET_MEMORY_INV;
+
+	return __set_memory((unsigned long)page_to_virt(page), nr, flags);
+}
+
+bool kernel_page_present(struct page *page)
+{
+	unsigned long addr;
+	unsigned int cc;
+
+	addr = (unsigned long)page_address(page);
+	asm volatile(
+		"	lra	%[addr],0(%[addr])\n"
+		CC_IPM(cc)
+		: CC_OUT(cc, cc), [addr] "+a" (addr)
+		:
+		: CC_CLOBBER);
+	return CC_TRANSFORM(cc) == 0;
 }
 
 #if defined(CONFIG_DEBUG_PAGEALLOC) || defined(CONFIG_KFENCE)

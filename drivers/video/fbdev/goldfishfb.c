@@ -162,27 +162,24 @@ static int goldfish_fb_blank(int blank, struct fb_info *info)
 
 static const struct fb_ops goldfish_fb_ops = {
 	.owner          = THIS_MODULE,
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_check_var   = goldfish_fb_check_var,
 	.fb_set_par     = goldfish_fb_set_par,
 	.fb_setcolreg   = goldfish_fb_setcolreg,
 	.fb_pan_display = goldfish_fb_pan_display,
 	.fb_blank	= goldfish_fb_blank,
-	.fb_fillrect    = cfb_fillrect,
-	.fb_copyarea    = cfb_copyarea,
-	.fb_imageblit   = cfb_imageblit,
 };
 
 
 static int goldfish_fb_probe(struct platform_device *pdev)
 {
 	int ret;
-	struct resource *r;
 	struct goldfish_fb *fb;
 	size_t framesize;
 	u32 width, height;
 	dma_addr_t fbpaddr;
 
-	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+	fb = kzalloc_obj(*fb);
 	if (fb == NULL) {
 		ret = -ENOMEM;
 		goto err_fb_alloc_failed;
@@ -191,20 +188,15 @@ static int goldfish_fb_probe(struct platform_device *pdev)
 	init_waitqueue_head(&fb->wait);
 	platform_set_drvdata(pdev, fb);
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (r == NULL) {
-		ret = -ENODEV;
-		goto err_no_io_base;
-	}
-	fb->reg_base = ioremap(r->start, PAGE_SIZE);
-	if (fb->reg_base == NULL) {
-		ret = -ENOMEM;
+	fb->reg_base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(fb->reg_base)) {
+		ret = PTR_ERR(fb->reg_base);
 		goto err_no_io_base;
 	}
 
 	fb->irq = platform_get_irq(pdev, 0);
-	if (fb->irq <= 0) {
-		ret = -ENODEV;
+	if (fb->irq < 0) {
+		ret = fb->irq;
 		goto err_no_irq;
 	}
 
@@ -212,7 +204,6 @@ static int goldfish_fb_probe(struct platform_device *pdev)
 	height = readl(fb->reg_base + FB_GET_HEIGHT);
 
 	fb->fb.fbops		= &goldfish_fb_ops;
-	fb->fb.flags		= FBINFO_FLAG_DEFAULT;
 	fb->fb.pseudo_palette	= fb->cmap;
 	fb->fb.fix.type		= FB_TYPE_PACKED_PIXELS;
 	fb->fb.fix.visual = FB_VISUAL_TRUECOLOR;
@@ -276,7 +267,6 @@ err_fb_set_var_failed:
 				fb->fb.fix.smem_start);
 err_alloc_screen_base_failed:
 err_no_irq:
-	iounmap(fb->reg_base);
 err_no_io_base:
 	kfree(fb);
 err_fb_alloc_failed:
@@ -294,7 +284,6 @@ static void goldfish_fb_remove(struct platform_device *pdev)
 
 	dma_free_coherent(&pdev->dev, framesize, (void *)fb->fb.screen_base,
 						fb->fb.fix.smem_start);
-	iounmap(fb->reg_base);
 	kfree(fb);
 }
 
@@ -314,7 +303,7 @@ MODULE_DEVICE_TABLE(acpi, goldfish_fb_acpi_match);
 
 static struct platform_driver goldfish_fb_driver = {
 	.probe		= goldfish_fb_probe,
-	.remove_new	= goldfish_fb_remove,
+	.remove		= goldfish_fb_remove,
 	.driver = {
 		.name = "goldfish_fb",
 		.of_match_table = goldfish_fb_of_match,
@@ -324,4 +313,5 @@ static struct platform_driver goldfish_fb_driver = {
 
 module_platform_driver(goldfish_fb_driver);
 
+MODULE_DESCRIPTION("Goldfish Virtual Platform Framebuffer driver");
 MODULE_LICENSE("GPL v2");

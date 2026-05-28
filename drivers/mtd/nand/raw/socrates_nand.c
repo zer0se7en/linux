@@ -8,8 +8,9 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/rawnand.h>
 #include <linux/mtd/partitions.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/io.h>
 
 #define FPGA_NAND_CMD_MASK		(0x7 << 28)
@@ -230,7 +231,7 @@ static struct platform_driver socrates_nand_driver = {
 		.of_match_table = socrates_nand_match,
 	},
 	.probe		= socrates_nand_probe,
-	.remove_new	= socrates_nand_remove,
+	.remove		= socrates_nand_remove,
 };
 
 module_platform_driver(socrates_nand_driver);

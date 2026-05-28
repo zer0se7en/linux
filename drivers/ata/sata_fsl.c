@@ -12,6 +12,9 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -19,9 +22,6 @@
 #include <scsi/scsi_cmnd.h>
 #include <linux/libata.h>
 #include <asm/io.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
-#include <linux/of_platform.h>
 
 static unsigned int intr_coalescing_count;
 module_param(intr_coalescing_count, int, S_IRUGO);
@@ -706,7 +706,7 @@ static int sata_fsl_port_start(struct ata_port *ap)
 	void __iomem *hcr_base = host_priv->hcr_base;
 	u32 temp;
 
-	pp = kzalloc(sizeof(*pp), GFP_KERNEL);
+	pp = kzalloc_obj(*pp);
 	if (!pp)
 		return -ENOMEM;
 
@@ -1395,9 +1395,9 @@ static struct ata_port_operations sata_fsl_ops = {
 
 	.freeze = sata_fsl_freeze,
 	.thaw = sata_fsl_thaw,
-	.softreset = sata_fsl_softreset,
-	.hardreset = sata_fsl_hardreset,
-	.pmp_softreset = sata_fsl_softreset,
+	.reset.softreset = sata_fsl_softreset,
+	.reset.hardreset = sata_fsl_hardreset,
+	.pmp_reset.softreset = sata_fsl_softreset,
 	.error_handler = sata_fsl_error_handler,
 	.post_internal_cmd = sata_fsl_post_internal_cmd,
 
@@ -1451,7 +1451,7 @@ static int sata_fsl_probe(struct platform_device *ofdev)
 	dev_dbg(&ofdev->dev, "@reset i/o = 0x%x\n",
 		ioread32(csr_base + TRANSCFG));
 
-	host_priv = kzalloc(sizeof(struct sata_fsl_host_priv), GFP_KERNEL);
+	host_priv = kzalloc_obj(struct sata_fsl_host_priv);
 	if (!host_priv)
 		goto error_exit_with_cleanup;
 
@@ -1526,7 +1526,7 @@ error_exit_with_cleanup:
 	return retval;
 }
 
-static int sata_fsl_remove(struct platform_device *ofdev)
+static void sata_fsl_remove(struct platform_device *ofdev)
 {
 	struct ata_host *host = platform_get_drvdata(ofdev);
 	struct sata_fsl_host_priv *host_priv = host->private_data;
@@ -1535,8 +1535,6 @@ static int sata_fsl_remove(struct platform_device *ofdev)
 	device_remove_file(&ofdev->dev, &host_priv->rx_watermark);
 
 	ata_host_detach(host);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

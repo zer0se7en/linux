@@ -25,7 +25,9 @@
 #include <linux/kthread.h>
 #include <linux/moduleparam.h>
 #include <linux/freezer.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
 
 #include <asm/machdep.h>
 #include <asm/io.h>
@@ -496,7 +498,7 @@ static int probe_thermostat(struct i2c_client *client)
 		}
 	}
 
-	th = kzalloc(sizeof(struct thermostat), GFP_KERNEL);
+	th = kzalloc_obj(struct thermostat);
 	if (!th)
 		return -ENOMEM;
 
@@ -598,7 +600,7 @@ static struct i2c_driver thermostat_driver = {
 	.driver = {
 		.name	= "therm_adt746x",
 	},
-	.probe_new = probe_thermostat,
+	.probe = probe_thermostat,
 	.remove = remove_thermostat,
 	.id_table = therm_adt746x_id,
 };

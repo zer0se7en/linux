@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2022 Intel Corporation
 //
 
 /*
@@ -16,6 +16,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/module.h>
+#include <linux/string_choices.h>
 
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_MLINK)
 
@@ -42,6 +43,7 @@
  * @shim_offset:	offset to SHIM register base
  * @ip_offset:		offset to IP register base
  * @shim_vs_offset:	offset to vendor-specific (VS) SHIM base
+ * @mic_privacy_mask:	bitmask of sublinks where mic privacy is applied
  */
 struct hdac_ext2_link {
 	struct hdac_ext_link hext_link;
@@ -65,6 +67,8 @@ struct hdac_ext2_link {
 	u32 shim_offset;
 	u32 ip_offset;
 	u32 shim_vs_offset;
+
+	unsigned long mic_privacy_mask;
 };
 
 #define hdac_ext_link_to_ext2(h) container_of(h, struct hdac_ext2_link, hext_link)
@@ -89,6 +93,13 @@ struct hdac_ext2_link {
 #define AZX_REG_INTEL_UAOL_SHIM_OFFSET			0x0
 #define AZX_REG_INTEL_UAOL_IP_OFFSET			0x100
 #define AZX_REG_INTEL_UAOL_VS_SHIM_OFFSET		0xC00
+
+/* Microphone privacy */
+#define AZX_REG_INTEL_VS_SHIM_PVCCS			0x10
+#define AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTSCHGIE		BIT(0)
+#define AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTSCHG		BIT(8)
+#define AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTS		BIT(9)
+#define AZX_REG_INTEL_VS_SHIM_PVCCS_FMDIS		BIT(10)
 
 /* HDAML section - this part follows sequences in the hardware specification,
  * including naming conventions and the use of the hdaml_ prefix.
@@ -331,14 +342,19 @@ static bool hdaml_link_check_cmdsync(u32 __iomem *lsync, u32 cmdsync_mask)
 	return !!(val & cmdsync_mask);
 }
 
-static void hdaml_link_set_lsdiid(u32 __iomem *lsdiid, int dev_num)
+static u16 hdaml_link_get_lsdiid(u16 __iomem *lsdiid)
 {
-	u32 val;
+	return readw(lsdiid);
+}
 
-	val = readl(lsdiid);
+static void hdaml_link_set_lsdiid(u16 __iomem *lsdiid, int dev_num)
+{
+	u16 val;
+
+	val = readw(lsdiid);
 	val |= BIT(dev_num);
 
-	writel(val, lsdiid);
+	writew(val, lsdiid);
 }
 
 static void hdaml_shim_map_stream_ch(u16 __iomem *pcmsycm, int lchan, int hchan,
@@ -376,7 +392,7 @@ static int hda_ml_alloc_h2link(struct hdac_bus *bus, int index)
 	struct hdac_ext_link *hlink;
 	int ret;
 
-	h2link  = kzalloc(sizeof(*h2link), GFP_KERNEL);
+	h2link = kzalloc_obj(*h2link);
 	if (!h2link)
 		return -ENOMEM;
 
@@ -429,7 +445,7 @@ int hda_bus_ml_init(struct hdac_bus *bus)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_init, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_init, "SND_SOC_SOF_HDA_MLINK");
 
 void hda_bus_ml_free(struct hdac_bus *bus)
 {
@@ -447,7 +463,7 @@ void hda_bus_ml_free(struct hdac_bus *bus)
 		kfree(h2link);
 	}
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_free, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_free, "SND_SOC_SOF_HDA_MLINK");
 
 static struct hdac_ext2_link *
 find_ext2_link(struct hdac_bus *bus, bool alt, int elid)
@@ -474,7 +490,25 @@ int hdac_bus_eml_get_count(struct hdac_bus *bus, bool alt, int elid)
 
 	return h2link->slcount;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_get_count, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_get_count, "SND_SOC_SOF_HDA_MLINK");
+
+void hdac_bus_eml_enable_interrupt_unlocked(struct hdac_bus *bus, bool alt, int elid, bool enable)
+{
+	struct hdac_ext2_link *h2link;
+	struct hdac_ext_link *hlink;
+
+	h2link = find_ext2_link(bus, alt, elid);
+	if (!h2link)
+		return;
+
+	if (!h2link->intc)
+		return;
+
+	hlink = &h2link->hext_link;
+
+	hdaml_link_enable_interrupt(hlink->ml_addr + AZX_REG_ML_LCTL, enable);
+}
+EXPORT_SYMBOL_NS(hdac_bus_eml_enable_interrupt_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 void hdac_bus_eml_enable_interrupt(struct hdac_bus *bus, bool alt, int elid, bool enable)
 {
@@ -490,13 +524,10 @@ void hdac_bus_eml_enable_interrupt(struct hdac_bus *bus, bool alt, int elid, boo
 
 	hlink = &h2link->hext_link;
 
-	mutex_lock(&h2link->eml_lock);
-
-	hdaml_link_enable_interrupt(hlink->ml_addr + AZX_REG_ML_LCTL, enable);
-
-	mutex_unlock(&h2link->eml_lock);
+	scoped_guard(mutex, &h2link->eml_lock)
+		hdaml_link_enable_interrupt(hlink->ml_addr + AZX_REG_ML_LCTL, enable);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_enable_interrupt, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_enable_interrupt, "SND_SOC_SOF_HDA_MLINK");
 
 bool hdac_bus_eml_check_interrupt(struct hdac_bus *bus, bool alt, int elid)
 {
@@ -514,7 +545,7 @@ bool hdac_bus_eml_check_interrupt(struct hdac_bus *bus, bool alt, int elid)
 
 	return hdaml_link_check_interrupt(hlink->ml_addr + AZX_REG_ML_LCTL);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_check_interrupt, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_check_interrupt, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_set_syncprd_unlocked(struct hdac_bus *bus, bool alt, int elid, u32 syncprd)
 {
@@ -534,13 +565,13 @@ int hdac_bus_eml_set_syncprd_unlocked(struct hdac_bus *bus, bool alt, int elid, 
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_set_syncprd_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_set_syncprd_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_set_syncprd_unlocked(struct hdac_bus *bus, u32 syncprd)
 {
 	return hdac_bus_eml_set_syncprd_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW, syncprd);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_set_syncprd_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_set_syncprd_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_wait_syncpu_unlocked(struct hdac_bus *bus, bool alt, int elid)
 {
@@ -558,13 +589,13 @@ int hdac_bus_eml_wait_syncpu_unlocked(struct hdac_bus *bus, bool alt, int elid)
 
 	return hdaml_link_wait_syncpu(hlink->ml_addr + AZX_REG_ML_LSYNC);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_wait_syncpu_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_wait_syncpu_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_wait_syncpu_unlocked(struct hdac_bus *bus)
 {
 	return hdac_bus_eml_wait_syncpu_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_wait_syncpu_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_wait_syncpu_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 void hdac_bus_eml_sync_arm_unlocked(struct hdac_bus *bus, bool alt, int elid, int sublink)
 {
@@ -582,13 +613,13 @@ void hdac_bus_eml_sync_arm_unlocked(struct hdac_bus *bus, bool alt, int elid, in
 
 	hdaml_link_sync_arm(hlink->ml_addr + AZX_REG_ML_LSYNC, sublink);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sync_arm_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sync_arm_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 void hdac_bus_eml_sdw_sync_arm_unlocked(struct hdac_bus *bus, int sublink)
 {
 	hdac_bus_eml_sync_arm_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW, sublink);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_sync_arm_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_sync_arm_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sync_go_unlocked(struct hdac_bus *bus, bool alt, int elid)
 {
@@ -608,13 +639,13 @@ int hdac_bus_eml_sync_go_unlocked(struct hdac_bus *bus, bool alt, int elid)
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sync_go_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sync_go_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_sync_go_unlocked(struct hdac_bus *bus)
 {
 	return hdac_bus_eml_sync_go_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_sync_go_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_sync_go_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 bool hdac_bus_eml_check_cmdsync_unlocked(struct hdac_bus *bus, bool alt, int elid)
 {
@@ -637,13 +668,13 @@ bool hdac_bus_eml_check_cmdsync_unlocked(struct hdac_bus *bus, bool alt, int eli
 	return hdaml_link_check_cmdsync(hlink->ml_addr + AZX_REG_ML_LSYNC,
 					cmdsync_mask);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_check_cmdsync_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_check_cmdsync_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 bool hdac_bus_eml_sdw_check_cmdsync_unlocked(struct hdac_bus *bus)
 {
 	return hdac_bus_eml_check_cmdsync_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_check_cmdsync_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_check_cmdsync_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 static int hdac_bus_eml_power_up_base(struct hdac_bus *bus, bool alt, int elid, int sublink,
 				      bool eml_lock)
@@ -673,6 +704,20 @@ static int hdac_bus_eml_power_up_base(struct hdac_bus *bus, bool alt, int elid, 
 	}
 
 	ret = hdaml_link_init(hlink->ml_addr + AZX_REG_ML_LCTL, sublink);
+	if ((h2link->mic_privacy_mask & BIT(sublink)) && !ret) {
+		u16 __iomem *pvccs = h2link->base_ptr +
+				     h2link->shim_vs_offset +
+				     sublink * h2link->instance_offset +
+				     AZX_REG_INTEL_VS_SHIM_PVCCS;
+		u16 val = readw(pvccs);
+
+		writew(val | AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTSCHGIE, pvccs);
+
+		if (val & AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTS)
+			dev_dbg(bus->dev,
+				"sublink %d (%d:%d): Mic privacy is enabled\n",
+				sublink, alt, elid);
+	}
 
 skip_init:
 	if (eml_lock)
@@ -685,13 +730,13 @@ int hdac_bus_eml_power_up(struct hdac_bus *bus, bool alt, int elid, int sublink)
 {
 	return hdac_bus_eml_power_up_base(bus, alt, elid, sublink, true);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_power_up, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_power_up, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_power_up_unlocked(struct hdac_bus *bus, bool alt, int elid, int sublink)
 {
 	return hdac_bus_eml_power_up_base(bus, alt, elid, sublink, false);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_power_up_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_power_up_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 static int hdac_bus_eml_power_down_base(struct hdac_bus *bus, bool alt, int elid, int sublink,
 					bool eml_lock)
@@ -719,6 +764,16 @@ static int hdac_bus_eml_power_down_base(struct hdac_bus *bus, bool alt, int elid
 		if (--h2link->sublink_ref_count[sublink] > 0)
 			goto skip_shutdown;
 	}
+
+	if (h2link->mic_privacy_mask & BIT(sublink)) {
+		u16 __iomem *pvccs = h2link->base_ptr +
+				     h2link->shim_vs_offset +
+				     sublink * h2link->instance_offset +
+				     AZX_REG_INTEL_VS_SHIM_PVCCS;
+
+		writew(readw(pvccs) & ~AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTSCHGIE, pvccs);
+	}
+
 	ret = hdaml_link_shutdown(hlink->ml_addr + AZX_REG_ML_LCTL, sublink);
 
 skip_shutdown:
@@ -732,25 +787,41 @@ int hdac_bus_eml_power_down(struct hdac_bus *bus, bool alt, int elid, int sublin
 {
 	return hdac_bus_eml_power_down_base(bus, alt, elid, sublink, true);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_power_down, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_power_down, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_power_down_unlocked(struct hdac_bus *bus, bool alt, int elid, int sublink)
 {
 	return hdac_bus_eml_power_down_base(bus, alt, elid, sublink, false);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_power_down_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_power_down_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_power_up_unlocked(struct hdac_bus *bus, int sublink)
 {
 	return hdac_bus_eml_power_up_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW, sublink);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_power_up_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_power_up_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_power_down_unlocked(struct hdac_bus *bus, int sublink)
 {
 	return hdac_bus_eml_power_down_unlocked(bus, true, AZX_REG_ML_LEPTR_ID_SDW, sublink);
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_power_down_unlocked, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_power_down_unlocked, "SND_SOC_SOF_HDA_MLINK");
+
+int hdac_bus_eml_sdw_get_lsdiid_unlocked(struct hdac_bus *bus, int sublink, u16 *lsdiid)
+{
+	struct hdac_ext2_link *h2link;
+	struct hdac_ext_link *hlink;
+
+	h2link = find_ext2_link(bus, true, AZX_REG_ML_LEPTR_ID_SDW);
+	if (!h2link)
+		return -ENODEV;
+
+	hlink = &h2link->hext_link;
+
+	*lsdiid = hdaml_link_get_lsdiid(hlink->ml_addr + AZX_REG_ML_LSDIID_OFFSET(sublink));
+
+	return 0;
+} EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_get_lsdiid_unlocked, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_sdw_set_lsdiid(struct hdac_bus *bus, int sublink, int dev_num)
 {
@@ -763,14 +834,11 @@ int hdac_bus_eml_sdw_set_lsdiid(struct hdac_bus *bus, int sublink, int dev_num)
 
 	hlink = &h2link->hext_link;
 
-	mutex_lock(&h2link->eml_lock);
-
-	hdaml_link_set_lsdiid(hlink->ml_addr + AZX_REG_ML_LSDIID_OFFSET(sublink), dev_num);
-
-	mutex_unlock(&h2link->eml_lock);
+	scoped_guard(mutex, &h2link->eml_lock)
+		hdaml_link_set_lsdiid(hlink->ml_addr + AZX_REG_ML_LSDIID_OFFSET(sublink), dev_num);
 
 	return 0;
-} EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_set_lsdiid, SND_SOC_SOF_HDA_MLINK);
+} EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_set_lsdiid, "SND_SOC_SOF_HDA_MLINK");
 
 /*
  * the 'y' parameter comes from the PCMSyCM hardware register naming. 'y' refers to the
@@ -781,6 +849,8 @@ int hdac_bus_eml_sdw_map_stream_ch(struct hdac_bus *bus, int sublink, int y,
 {
 	struct hdac_ext2_link *h2link;
 	u16 __iomem *pcmsycm;
+	int hchan;
+	int lchan;
 	u16 val;
 
 	h2link = find_ext2_link(bus, true, AZX_REG_ML_LEPTR_ID_SDW);
@@ -791,20 +861,24 @@ int hdac_bus_eml_sdw_map_stream_ch(struct hdac_bus *bus, int sublink, int y,
 		h2link->instance_offset * sublink +
 		AZX_REG_SDW_SHIM_PCMSyCM(y);
 
-	mutex_lock(&h2link->eml_lock);
+	if (channel_mask) {
+		hchan = __fls(channel_mask);
+		lchan = __ffs(channel_mask);
+	} else {
+		hchan = 0;
+		lchan = 0;
+	}
 
-	hdaml_shim_map_stream_ch(pcmsycm, 0, hweight32(channel_mask),
-				 stream_id, dir);
-
-	mutex_unlock(&h2link->eml_lock);
+	scoped_guard(mutex, &h2link->eml_lock)
+		hdaml_shim_map_stream_ch(pcmsycm, lchan, hchan, stream_id, dir);
 
 	val = readw(pcmsycm);
 
-	dev_dbg(bus->dev, "channel_mask %#x stream_id %d dir %d pcmscm %#x\n",
-		channel_mask, stream_id, dir, val);
+	dev_dbg(bus->dev, "sublink %d channel_mask %#x stream_id %d dir %d pcmscm %#x\n",
+		sublink, channel_mask, stream_id, dir, val);
 
 	return 0;
-} EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_map_stream_ch, SND_SOC_SOF_HDA_MLINK);
+} EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_map_stream_ch, "SND_SOC_SOF_HDA_MLINK");
 
 void hda_bus_ml_put_all(struct hdac_bus *bus)
 {
@@ -817,7 +891,7 @@ void hda_bus_ml_put_all(struct hdac_bus *bus)
 			snd_hdac_ext_bus_link_put(bus, hlink);
 	}
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_put_all, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_put_all, "SND_SOC_SOF_HDA_MLINK");
 
 void hda_bus_ml_reset_losidv(struct hdac_bus *bus)
 {
@@ -827,7 +901,7 @@ void hda_bus_ml_reset_losidv(struct hdac_bus *bus)
 	list_for_each_entry(hlink, &bus->hlink_list, list)
 		writel(0, hlink->ml_addr + AZX_REG_ML_LOSIDV);
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_reset_losidv, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_reset_losidv, "SND_SOC_SOF_HDA_MLINK");
 
 int hda_bus_ml_resume(struct hdac_bus *bus)
 {
@@ -846,7 +920,7 @@ int hda_bus_ml_resume(struct hdac_bus *bus)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_resume, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_resume, "SND_SOC_SOF_HDA_MLINK");
 
 int hda_bus_ml_suspend(struct hdac_bus *bus)
 {
@@ -864,7 +938,7 @@ int hda_bus_ml_suspend(struct hdac_bus *bus)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS(hda_bus_ml_suspend, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hda_bus_ml_suspend, "SND_SOC_SOF_HDA_MLINK");
 
 struct mutex *hdac_bus_eml_get_mutex(struct hdac_bus *bus, bool alt, int elid)
 {
@@ -876,7 +950,7 @@ struct mutex *hdac_bus_eml_get_mutex(struct hdac_bus *bus, bool alt, int elid)
 
 	return &h2link->eml_lock;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_get_mutex, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_get_mutex, "SND_SOC_SOF_HDA_MLINK");
 
 struct hdac_ext_link *hdac_bus_eml_ssp_get_hlink(struct hdac_bus *bus)
 {
@@ -888,7 +962,7 @@ struct hdac_ext_link *hdac_bus_eml_ssp_get_hlink(struct hdac_bus *bus)
 
 	return &h2link->hext_link;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_ssp_get_hlink, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_ssp_get_hlink, "SND_SOC_SOF_HDA_MLINK");
 
 struct hdac_ext_link *hdac_bus_eml_dmic_get_hlink(struct hdac_bus *bus)
 {
@@ -900,7 +974,7 @@ struct hdac_ext_link *hdac_bus_eml_dmic_get_hlink(struct hdac_bus *bus)
 
 	return &h2link->hext_link;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_dmic_get_hlink, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_dmic_get_hlink, "SND_SOC_SOF_HDA_MLINK");
 
 struct hdac_ext_link *hdac_bus_eml_sdw_get_hlink(struct hdac_bus *bus)
 {
@@ -912,7 +986,7 @@ struct hdac_ext_link *hdac_bus_eml_sdw_get_hlink(struct hdac_bus *bus)
 
 	return &h2link->hext_link;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_get_hlink, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_sdw_get_hlink, "SND_SOC_SOF_HDA_MLINK");
 
 int hdac_bus_eml_enable_offload(struct hdac_bus *bus, bool alt, int elid, bool enable)
 {
@@ -928,16 +1002,106 @@ int hdac_bus_eml_enable_offload(struct hdac_bus *bus, bool alt, int elid, bool e
 
 	hlink = &h2link->hext_link;
 
-	mutex_lock(&h2link->eml_lock);
-
-	hdaml_lctl_offload_enable(hlink->ml_addr + AZX_REG_ML_LCTL, enable);
-
-	mutex_unlock(&h2link->eml_lock);
+	scoped_guard(mutex, &h2link->eml_lock)
+		hdaml_lctl_offload_enable(hlink->ml_addr + AZX_REG_ML_LCTL, enable);
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(hdac_bus_eml_enable_offload, SND_SOC_SOF_HDA_MLINK);
+EXPORT_SYMBOL_NS(hdac_bus_eml_enable_offload, "SND_SOC_SOF_HDA_MLINK");
+
+void hdac_bus_eml_set_mic_privacy_mask(struct hdac_bus *bus, bool alt, int elid,
+				       unsigned long mask)
+{
+	struct hdac_ext2_link *h2link;
+
+	if (!mask)
+		return;
+
+	h2link = find_ext2_link(bus, alt, elid);
+	if (!h2link)
+		return;
+
+	if (__fls(mask) > h2link->slcount) {
+		dev_warn(bus->dev,
+			 "%s: invalid sublink mask for %d:%d, slcount %d: %#lx\n",
+			 __func__, alt, elid, h2link->slcount, mask);
+		return;
+	}
+
+	dev_dbg(bus->dev, "sublink mask for %d:%d, slcount %d: %#lx\n", alt,
+		elid, h2link->slcount, mask);
+
+	h2link->mic_privacy_mask = mask;
+}
+EXPORT_SYMBOL_NS(hdac_bus_eml_set_mic_privacy_mask, "SND_SOC_SOF_HDA_MLINK");
+
+bool hdac_bus_eml_is_mic_privacy_changed(struct hdac_bus *bus, bool alt, int elid)
+{
+	struct hdac_ext2_link *h2link;
+	bool changed = false;
+	u16 __iomem *pvccs;
+	int i;
+
+	h2link = find_ext2_link(bus, alt, elid);
+	if (!h2link)
+		return false;
+
+	/* The change in privacy state needs to be acked for each link */
+	for_each_set_bit(i, &h2link->mic_privacy_mask, h2link->slcount) {
+		u16 val;
+
+		if (h2link->sublink_ref_count[i] == 0)
+			continue;
+
+		pvccs = h2link->base_ptr +
+			h2link->shim_vs_offset +
+			i * h2link->instance_offset +
+			AZX_REG_INTEL_VS_SHIM_PVCCS;
+
+		val = readw(pvccs);
+		if (val & AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTSCHG) {
+			writew(val, pvccs);
+			changed = true;
+		}
+	}
+
+	return changed;
+}
+EXPORT_SYMBOL_NS(hdac_bus_eml_is_mic_privacy_changed, "SND_SOC_SOF_HDA_MLINK");
+
+bool hdac_bus_eml_get_mic_privacy_state(struct hdac_bus *bus, bool alt, int elid)
+{
+	struct hdac_ext2_link *h2link;
+	u16 __iomem *pvccs;
+	bool state;
+	int i;
+
+	h2link = find_ext2_link(bus, alt, elid);
+	if (!h2link)
+		return false;
+
+	for_each_set_bit(i, &h2link->mic_privacy_mask, h2link->slcount) {
+		if (h2link->sublink_ref_count[i] == 0)
+			continue;
+
+		/* Return the privacy state from the first active link */
+		pvccs = h2link->base_ptr +
+			h2link->shim_vs_offset +
+			i * h2link->instance_offset +
+			AZX_REG_INTEL_VS_SHIM_PVCCS;
+
+		state = readw(pvccs) & AZX_REG_INTEL_VS_SHIM_PVCCS_MDSTS;
+		dev_dbg(bus->dev, "alt: %d, elid: %d: Mic privacy is %s\n", alt,
+			elid, str_enabled_disabled(state));
+
+		return state;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_NS(hdac_bus_eml_get_mic_privacy_state, "SND_SOC_SOF_HDA_MLINK");
 
 #endif
 
 MODULE_LICENSE("Dual BSD/GPL");
+MODULE_DESCRIPTION("SOF support for HDaudio multi-link");

@@ -113,7 +113,6 @@ void dml_init_instance(struct display_mode_lib *lib,
 		lib->funcs = dml30_funcs;
 		break;
 	case DML_PROJECT_DCN31:
-	case DML_PROJECT_DCN31_FPGA:
 	case DML_PROJECT_DCN315:
 		lib->funcs = dml31_funcs;
 		break;
@@ -163,6 +162,7 @@ void dml_log_pipe_params(
 		display_e2e_pipe_params_st *pipes,
 		int pipe_cnt)
 {
+	(void)mode_lib;
 	display_pipe_source_params_st *pipe_src;
 	display_pipe_dest_params_st   *pipe_dest;
 	scaler_ratio_depth_st         *scale_ratio_depth;

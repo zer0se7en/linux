@@ -663,6 +663,7 @@ struct ocelot_ops {
 			      struct flow_stats *stats);
 	void (*cut_through_fwd)(struct ocelot *ocelot);
 	void (*tas_clock_adjust)(struct ocelot *ocelot);
+	void (*tas_guard_bands_update)(struct ocelot *ocelot, int port);
 	void (*update_stats)(struct ocelot *ocelot);
 };
 
@@ -730,6 +731,11 @@ enum macaccess_entry_type {
 	ENTRYTYPE_MACv6,
 };
 
+enum ocelot_proto {
+	OCELOT_PROTO_PTP_L2 = BIT(0),
+	OCELOT_PROTO_PTP_L4 = BIT(1),
+};
+
 #define OCELOT_QUIRK_PCS_PERFORMS_RATE_ADAPTATION	BIT(0)
 #define OCELOT_QUIRK_QSGMII_PORTS_MUST_BE_UP		BIT(1)
 
@@ -753,6 +759,14 @@ struct ocelot_mm_state {
 	u8 active_preemptible_tcs;
 };
 
+struct ocelot_ts_stats {
+	u64 pkts;
+	u64 onestep_pkts_unconfirmed;
+	u64 lost;
+	u64 err;
+	struct u64_stats_sync syncp;
+};
+
 struct ocelot_port;
 
 struct ocelot_port {
@@ -772,13 +786,14 @@ struct ocelot_port {
 
 	phy_interface_t			phy_mode;
 
-	unsigned int			ptp_skbs_in_flight;
+	struct ocelot_ts_stats		*ts_stats;
 	struct sk_buff_head		tx_skbs;
+
+	unsigned int			trap_proto;
 
 	u16				mrp_ring_id;
 
 	u8				ptp_cmd;
-	u8				ts_id;
 
 	u8				index;
 
@@ -804,6 +819,9 @@ struct ocelot {
 	struct regmap_field		*regfields[REGFIELD_MAX];
 	const u32 *const		*map;
 	struct list_head		stats_regions;
+
+	spinlock_t			inj_lock;
+	spinlock_t			xtr_lock;
 
 	u32				pool_size[OCELOT_SB_NUM][OCELOT_SB_POOL_NUM];
 	int				packet_buffer_size;
@@ -856,11 +874,11 @@ struct ocelot {
 	struct mutex			stat_view_lock;
 	/* Lock for serializing access to the MAC table */
 	struct mutex			mact_lock;
-	/* Lock for serializing forwarding domain changes */
+	/* Lock for serializing forwarding domain changes, including the
+	 * configuration of the Time-Aware Shaper, MAC Merge layer and
+	 * cut-through forwarding, on which it depends
+	 */
 	struct mutex			fwd_domain_lock;
-
-	/* Lock for serializing Time-Aware Shaper changes */
-	struct mutex			tas_lock;
 
 	struct workqueue_struct		*owq;
 
@@ -868,12 +886,9 @@ struct ocelot {
 	u8				mm_supported:1;
 	struct ptp_clock		*ptp_clock;
 	struct ptp_clock_info		ptp_info;
-	struct hwtstamp_config		hwtstamp_config;
 	unsigned int			ptp_skbs_in_flight;
 	/* Protects the 2-step TX timestamp ID logic */
 	spinlock_t			ts_id_lock;
-	/* Protects the PTP interface state */
-	struct mutex			ptp_lock;
 	/* Protects the PTP clock */
 	spinlock_t			ptp_clock_lock;
 	struct ptp_pin_desc		ptp_pins[OCELOT_PTP_PINS_NUM];
@@ -961,10 +976,17 @@ void __ocelot_target_write_ix(struct ocelot *ocelot, enum ocelot_target target,
 			      u32 val, u32 reg, u32 offset);
 
 /* Packet I/O */
+void ocelot_lock_inj_grp(struct ocelot *ocelot, int grp);
+void ocelot_unlock_inj_grp(struct ocelot *ocelot, int grp);
+void ocelot_lock_xtr_grp(struct ocelot *ocelot, int grp);
+void ocelot_unlock_xtr_grp(struct ocelot *ocelot, int grp);
+void ocelot_lock_xtr_grp_bh(struct ocelot *ocelot, int grp);
+void ocelot_unlock_xtr_grp_bh(struct ocelot *ocelot, int grp);
 bool ocelot_can_inject(struct ocelot *ocelot, int grp);
 void ocelot_port_inject_frame(struct ocelot *ocelot, int port, int grp,
 			      u32 rew_op, struct sk_buff *skb);
-void ocelot_ifh_port_set(void *ifh, int port, u32 rew_op, u32 vlan_tag);
+void ocelot_ifh_set_basic(void *ifh, struct ocelot *ocelot, int port,
+			  u32 rew_op, struct sk_buff *skb);
 int ocelot_xtr_poll_frame(struct ocelot *ocelot, int grp, struct sk_buff **skb);
 void ocelot_drain_cpu_queue(struct ocelot *ocelot, int grp);
 void ocelot_ptp_rx_timestamp(struct ocelot *ocelot, struct sk_buff *skb,
@@ -1010,8 +1032,10 @@ void ocelot_port_get_eth_mac_stats(struct ocelot *ocelot, int port,
 				   struct ethtool_eth_mac_stats *mac_stats);
 void ocelot_port_get_eth_phy_stats(struct ocelot *ocelot, int port,
 				   struct ethtool_eth_phy_stats *phy_stats);
+void ocelot_port_get_ts_stats(struct ocelot *ocelot, int port,
+			      struct ethtool_ts_stats *ts_stats);
 int ocelot_get_ts_info(struct ocelot *ocelot, int port,
-		       struct ethtool_ts_info *info);
+		       struct kernel_ethtool_ts_info *info);
 void ocelot_set_ageing_time(struct ocelot *ocelot, unsigned int msecs);
 int ocelot_port_vlan_filtering(struct ocelot *ocelot, int port, bool enabled,
 			       struct netlink_ext_ack *extack);
@@ -1049,8 +1073,11 @@ int ocelot_vlan_prepare(struct ocelot *ocelot, int port, u16 vid, bool pvid,
 int ocelot_vlan_add(struct ocelot *ocelot, int port, u16 vid, bool pvid,
 		    bool untagged);
 int ocelot_vlan_del(struct ocelot *ocelot, int port, u16 vid);
-int ocelot_hwstamp_get(struct ocelot *ocelot, int port, struct ifreq *ifr);
-int ocelot_hwstamp_set(struct ocelot *ocelot, int port, struct ifreq *ifr);
+void ocelot_hwstamp_get(struct ocelot *ocelot, int port,
+			struct kernel_hwtstamp_config *cfg);
+int ocelot_hwstamp_set(struct ocelot *ocelot, int port,
+		       struct kernel_hwtstamp_config *cfg,
+		       struct netlink_ext_ack *extack);
 int ocelot_port_txtstamp_request(struct ocelot *ocelot, int port,
 				 struct sk_buff *skb,
 				 struct sk_buff **clone);
@@ -1160,7 +1187,6 @@ int ocelot_port_get_mm(struct ocelot *ocelot, int port,
 		       struct ethtool_mm_state *state);
 int ocelot_port_mqprio(struct ocelot *ocelot, int port,
 		       struct tc_mqprio_qopt_offload *mqprio);
-void ocelot_port_update_preemptible_tcs(struct ocelot *ocelot, int port);
 
 #if IS_ENABLED(CONFIG_BRIDGE_MRP)
 int ocelot_mrp_add(struct ocelot *ocelot, int port,

@@ -156,7 +156,7 @@ static int omap_device_build_from_dt(struct platform_device *pdev)
 	    !omap_hwmod_parse_module_range(NULL, node, &res))
 		return -ENODEV;
 
-	hwmods = kcalloc(oh_cnt, sizeof(struct omap_hwmod *), GFP_KERNEL);
+	hwmods = kzalloc_objs(struct omap_hwmod *, oh_cnt);
 	if (!hwmods) {
 		ret = -ENOMEM;
 		goto odbfd_exit;
@@ -244,7 +244,6 @@ static int _omap_device_notifier_call(struct notifier_block *nb,
 	case BUS_NOTIFY_ADD_DEVICE:
 		if (pdev->dev.of_node)
 			omap_device_build_from_dt(pdev);
-		omap_auxdata_legacy_init(dev);
 		fallthrough;
 	default:
 		od = to_omap_device(pdev);
@@ -310,13 +309,13 @@ static struct omap_device *omap_device_alloc(struct platform_device *pdev,
 	int i;
 	struct omap_hwmod **hwmods;
 
-	od = kzalloc(sizeof(struct omap_device), GFP_KERNEL);
+	od = kzalloc_obj(struct omap_device);
 	if (!od)
 		goto oda_exit1;
 
 	od->hwmods_cnt = oh_cnt;
 
-	hwmods = kmemdup(ohs, sizeof(struct omap_hwmod *) * oh_cnt, GFP_KERNEL);
+	hwmods = kmemdup_array(ohs, oh_cnt, sizeof(*hwmods), GFP_KERNEL);
 	if (!hwmods)
 		goto oda_exit2;
 

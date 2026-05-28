@@ -114,16 +114,15 @@ int asymmetric_verify(struct key *keyring, const char *sig,
 	} else if (!strncmp(pk->pkey_algo, "ecdsa-", 6)) {
 		/* edcsa-nist-p192 etc. */
 		pks.encoding = "x962";
-	} else if (!strcmp(pk->pkey_algo, "ecrdsa") ||
-		   !strcmp(pk->pkey_algo, "sm2")) {
+	} else if (!strcmp(pk->pkey_algo, "ecrdsa")) {
 		pks.encoding = "raw";
 	} else {
 		ret = -ENOPKG;
 		goto out;
 	}
 
-	pks.digest = (u8 *)data;
-	pks.digest_size = datalen;
+	pks.m = (u8 *)data;
+	pks.m_size = datalen;
 	pks.s = hdr->sig;
 	pks.s_size = siglen;
 	ret = verify_signature(key, &pks);
@@ -133,25 +132,61 @@ out:
 	return ret;
 }
 
-/**
- * integrity_kernel_module_request - prevent crypto-pkcs1pad(rsa,*) requests
- * @kmod_name: kernel module name
+/*
+ * calc_file_id_hash - calculate the hash of the ima_file_id struct data
+ * @type: xattr type [enum evm_ima_xattr_type]
+ * @algo: hash algorithm [enum hash_algo]
+ * @digest: pointer to the digest to be hashed
+ * @hash: (out) pointer to the hash
  *
- * We have situation, when public_key_verify_signature() in case of RSA
- * algorithm use alg_name to store internal information in order to
- * construct an algorithm on the fly, but crypto_larval_lookup() will try
- * to use alg_name in order to load kernel module with same name.
- * Since we don't have any real "crypto-pkcs1pad(rsa,*)" kernel modules,
- * we are safe to fail such module request from crypto_larval_lookup().
+ * IMA signature version 3 disambiguates the data that is signed by
+ * indirectly signing the hash of the ima_file_id structure data.
  *
- * In this way we prevent modprobe execution during digsig verification
- * and avoid possible deadlock if modprobe and/or it's dependencies
- * also signed with digsig.
+ * Return 0 on success, error code otherwise.
  */
-int integrity_kernel_module_request(char *kmod_name)
+static int calc_file_id_hash(enum evm_ima_xattr_type type,
+			     enum hash_algo algo, const u8 *digest,
+			     struct ima_max_digest_data *hash)
 {
-	if (strncmp(kmod_name, "crypto-pkcs1pad(rsa,", 20) == 0)
+	struct ima_file_id file_id = {.hash_type = type, .hash_algorithm = algo};
+	size_t digest_size = hash_digest_size[algo];
+	struct crypto_shash *tfm;
+	size_t file_id_size;
+	int rc;
+
+	if (type != IMA_VERITY_DIGSIG && type != EVM_IMA_XATTR_DIGSIG &&
+	    type != EVM_XATTR_PORTABLE_DIGSIG)
 		return -EINVAL;
 
-	return 0;
+	tfm = crypto_alloc_shash(hash_algo_name[algo], 0, 0);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+
+	memcpy(file_id.hash, digest, digest_size);
+
+	/* Calculate the ima_file_id struct hash on the portion used. */
+	file_id_size = sizeof(file_id) - (HASH_MAX_DIGESTSIZE - digest_size);
+
+	hash->hdr.algo = algo;
+	hash->hdr.length = digest_size;
+	rc = crypto_shash_tfm_digest(tfm, (const u8 *)&file_id, file_id_size,
+				     hash->digest);
+
+	crypto_free_shash(tfm);
+	return rc;
+}
+
+int asymmetric_verify_v3(struct key *keyring, const char *sig, int siglen,
+			 const char *data, int datalen, u8 algo)
+{
+	struct signature_v2_hdr *hdr = (struct signature_v2_hdr *)sig;
+	struct ima_max_digest_data hash;
+	int rc;
+
+	rc = calc_file_id_hash(hdr->type, algo, data, &hash);
+	if (rc)
+		return -EINVAL;
+
+	return asymmetric_verify(keyring, sig, siglen, hash.digest,
+				 hash.hdr.length);
 }

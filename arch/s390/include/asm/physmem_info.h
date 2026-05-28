@@ -3,11 +3,13 @@
 #define _ASM_S390_MEM_DETECT_H
 
 #include <linux/types.h>
+#include <asm/page.h>
 
 enum physmem_info_source {
 	MEM_DETECT_NONE = 0,
 	MEM_DETECT_SCLP_STOR_INFO,
 	MEM_DETECT_DIAG260,
+	MEM_DETECT_DIAG500_STOR_LIMIT,
 	MEM_DETECT_SCLP_READ_INFO,
 	MEM_DETECT_BIN_SEARCH
 };
@@ -24,7 +26,7 @@ enum reserved_range_type {
 	RR_AMODE31,
 	RR_IPLREPORT,
 	RR_CERT_COMP_LIST,
-	RR_MEM_DETECT_EXTENDED,
+	RR_MEM_DETECT_EXT,
 	RR_VMEM,
 	RR_MAX
 };
@@ -106,6 +108,8 @@ static inline const char *get_physmem_info_source(void)
 		return "sclp storage info";
 	case MEM_DETECT_DIAG260:
 		return "diag260";
+	case MEM_DETECT_DIAG500_STOR_LIMIT:
+		return "diag500 storage limit";
 	case MEM_DETECT_SCLP_READ_INFO:
 		return "sclp read info";
 	case MEM_DETECT_BIN_SEARCH:
@@ -124,7 +128,7 @@ static inline const char *get_rr_type_name(enum reserved_range_type t)
 	RR_TYPE_NAME(AMODE31);
 	RR_TYPE_NAME(IPLREPORT);
 	RR_TYPE_NAME(CERT_COMP_LIST);
-	RR_TYPE_NAME(MEM_DETECT_EXTENDED);
+	RR_TYPE_NAME(MEM_DETECT_EXT);
 	RR_TYPE_NAME(VMEM);
 	default:
 		return "UNKNOWN";
@@ -133,7 +137,7 @@ static inline const char *get_rr_type_name(enum reserved_range_type t)
 
 #define for_each_physmem_reserved_type_range(t, range, p_start, p_end)				\
 	for (range = &physmem_info.reserved[t], *p_start = range->start, *p_end = range->end;	\
-	     range && range->end; range = range->chain,						\
+	     range && range->end; range = range->chain ? __va(range->chain) : NULL,		\
 	     *p_start = range ? range->start : 0, *p_end = range ? range->end : 0)
 
 static inline struct reserved_range *__physmem_reserved_next(enum reserved_range_type *t,
@@ -145,7 +149,7 @@ static inline struct reserved_range *__physmem_reserved_next(enum reserved_range
 			return range;
 	}
 	if (range->chain)
-		return range->chain;
+		return __va(range->chain);
 	while (++*t < RR_MAX) {
 		range = &physmem_info.reserved[*t];
 		if (range->end)
@@ -167,5 +171,8 @@ static inline unsigned long get_physmem_reserved(enum reserved_range_type type,
 	*size = physmem_info.reserved[type].end - physmem_info.reserved[type].start;
 	return *size;
 }
+
+#define AMODE31_START	(physmem_info.reserved[RR_AMODE31].start)
+#define AMODE31_END	(physmem_info.reserved[RR_AMODE31].end)
 
 #endif

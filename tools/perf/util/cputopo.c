@@ -12,7 +12,8 @@
 #include "cpumap.h"
 #include "debug.h"
 #include "env.h"
-#include "pmu-hybrid.h"
+#include "pmu.h"
+#include "pmus.h"
 
 #define PACKAGE_CPUS_FMT \
 	"%s/devices/system/cpu/cpu%d/topology/package_cpus_list"
@@ -190,7 +191,7 @@ bool cpu_topology__core_wide(const struct cpu_topology *topology,
 		const char *core_cpu_list = topology->core_cpus_list[i];
 		struct perf_cpu_map *core_cpus = perf_cpu_map__new(core_cpu_list);
 		struct perf_cpu cpu;
-		int idx;
+		unsigned int idx;
 		bool has_first, first = true;
 
 		perf_cpu_map__for_each_cpu(cpu, idx, core_cpus) {
@@ -266,7 +267,7 @@ struct cpu_topology *cpu_topology__new(void)
 	ncpus = cpu__max_present_cpu().cpu;
 
 	/* build online CPU map */
-	map = perf_cpu_map__new(NULL);
+	map = perf_cpu_map__new_online_cpus();
 	if (map == NULL) {
 		pr_debug("failed to get system cpumap\n");
 		return NULL;
@@ -469,12 +470,11 @@ err:
 
 struct hybrid_topology *hybrid_topology__new(void)
 {
-	struct perf_pmu *pmu;
+	struct perf_pmu *pmu = NULL;
 	struct hybrid_topology *tp = NULL;
-	u32 nr, i = 0;
+	int nr = perf_pmus__num_core_pmus(), i = 0;
 
-	nr = perf_pmu__hybrid_pmu_num();
-	if (nr == 0)
+	if (nr <= 1)
 		return NULL;
 
 	tp = zalloc(sizeof(*tp) + sizeof(tp->nodes[0]) * nr);
@@ -482,7 +482,7 @@ struct hybrid_topology *hybrid_topology__new(void)
 		return NULL;
 
 	tp->nr = nr;
-	perf_pmu__for_each_hybrid_pmu(pmu) {
+	while ((pmu = perf_pmus__scan_core(pmu)) != NULL) {
 		if (load_hybrid_node(&tp->nodes[i], pmu)) {
 			hybrid_topology__delete(tp);
 			return NULL;

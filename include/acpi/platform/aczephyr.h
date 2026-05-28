@@ -3,15 +3,12 @@
  *
  * Module Name: aczephyr.h - OS specific defines, etc.
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2025, Intel Corp.
  *
  *****************************************************************************/
 
 #ifndef __ACZEPHYR_H__
 #define __ACZEPHYR_H__
-
-#define SEEK_SET FS_SEEK_SET
-#define SEEK_END FS_SEEK_END
 
 #define ACPI_MACHINE_WIDTH      64
 

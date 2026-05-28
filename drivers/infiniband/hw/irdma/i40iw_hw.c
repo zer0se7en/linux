@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
 /* Copyright (c) 2015 - 2021 Intel Corporation */
 #include "osdep.h"
 #include "type.h"
@@ -85,6 +85,7 @@ static u64 i40iw_masks[IRDMA_MAX_MASKS] = {
 	I40E_CQPSQ_CQ_CEQID,
 	I40E_CQPSQ_CQ_CQID,
 	I40E_COMMIT_FPM_CQCNT,
+	I40E_CQPSQ_UPESD_HMCFNID,
 };
 
 static u64 i40iw_shifts[IRDMA_MAX_SHIFTS] = {
@@ -94,6 +95,7 @@ static u64 i40iw_shifts[IRDMA_MAX_SHIFTS] = {
 	I40E_CQPSQ_CQ_CEQID_S,
 	I40E_CQPSQ_CQ_CQID_S,
 	I40E_COMMIT_FPM_CQCNT_S,
+	I40E_CQPSQ_UPESD_HMCFNID_S,
 };
 
 /**
@@ -254,5 +256,6 @@ void i40iw_init_hw(struct irdma_sc_dev *dev)
 	dev->hw_attrs.max_stat_idx = IRDMA_HW_STAT_INDEX_MAX_GEN_1;
 	dev->hw_attrs.max_hw_outbound_msg_size = I40IW_MAX_OUTBOUND_MSG_SIZE;
 	dev->hw_attrs.max_hw_inbound_msg_size = I40IW_MAX_INBOUND_MSG_SIZE;
+	dev->hw_attrs.uk_attrs.min_hw_wq_size = I40IW_MIN_WQ_SIZE;
 	dev->hw_attrs.max_qp_wr = I40IW_MAX_QP_WRS;
 }

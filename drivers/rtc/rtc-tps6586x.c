@@ -241,7 +241,7 @@ static int tps6586x_rtc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	device_init_wakeup(&pdev->dev, 1);
+	device_init_wakeup(&pdev->dev, true);
 
 	platform_set_drvdata(pdev, rtc);
 	rtc->rtc = devm_rtc_allocate_device(&pdev->dev);
@@ -252,6 +252,7 @@ static int tps6586x_rtc_probe(struct platform_device *pdev)
 
 	rtc->rtc->ops = &tps6586x_rtc_ops;
 	rtc->rtc->range_max = (1ULL << 30) - 1; /* 30-bit seconds */
+	rtc->rtc->alarm_offset_max = ALM1_VALID_RANGE_IN_SEC;
 	rtc->rtc->start_secs = mktime64(2009, 1, 1, 0, 0, 0);
 	rtc->rtc->set_start_time = true;
 
@@ -316,7 +317,7 @@ static struct platform_driver tps6586x_rtc_driver = {
 		.pm	= &tps6586x_pm_ops,
 	},
 	.probe	= tps6586x_rtc_probe,
-	.remove_new = tps6586x_rtc_remove,
+	.remove = tps6586x_rtc_remove,
 };
 module_platform_driver(tps6586x_rtc_driver);
 

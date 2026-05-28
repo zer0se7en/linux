@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-only or BSD-2-Clause
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 %YAML 1.2
 ---
 $id: http://devicetree.org/schemas/display/panel/visionox,vtdr6130.yaml#
@@ -26,8 +26,6 @@ properties:
   port: true
   reset-gpios: true
 
-additionalProperties: false
-
 required:
   - compatible
   - reg
@@ -36,6 +34,8 @@ required:
   - vdd-supply
   - reset-gpios
   - port
+
+additionalProperties: false
 
 examples:
   - |

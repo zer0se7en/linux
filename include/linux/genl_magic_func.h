@@ -2,6 +2,7 @@
 #ifndef GENL_MAGIC_FUNC_H
 #define GENL_MAGIC_FUNC_H
 
+#include <linux/args.h>
 #include <linux/build_bug.h>
 #include <linux/genl_magic_struct.h>
 
@@ -23,7 +24,7 @@
 #define GENL_struct(tag_name, tag_number, s_name, s_fields)		\
 	[tag_name] = { .type = NLA_NESTED },
 
-static struct nla_policy CONCAT_(GENL_MAGIC_FAMILY, _tla_nl_policy)[] = {
+static struct nla_policy CONCATENATE(GENL_MAGIC_FAMILY, _tla_nl_policy)[] = {
 #include GENL_MAGIC_INCLUDE_FILE
 };
 
@@ -148,7 +149,8 @@ static int __ ## s_name ## _from_attrs(struct s_name *s,		\
 	if (!tla)							\
 		return -ENOMSG;						\
 	DPRINT_TLA(#s_name, "<=-", #tag_name);				\
-	err = drbd_nla_parse_nested(ntb, maxtype, tla, s_name ## _nl_policy);	\
+	err = nla_parse_nested_deprecated(ntb, maxtype, tla,			\
+					  s_name ## _nl_policy, NULL);	\
 	if (err)							\
 		return err;						\
 									\
@@ -209,7 +211,7 @@ static int s_name ## _from_attrs_for_change(struct s_name *s,		\
  * Magic: define op number to op name mapping				{{{1
  *									{{{2
  */
-static const char *CONCAT_(GENL_MAGIC_FAMILY, _genl_cmd_to_str)(__u8 cmd)
+static const char *CONCATENATE(GENL_MAGIC_FAMILY, _genl_cmd_to_str)(__u8 cmd)
 {
 	switch (cmd) {
 #undef GENL_op
@@ -235,7 +237,7 @@ static const char *CONCAT_(GENL_MAGIC_FAMILY, _genl_cmd_to_str)(__u8 cmd)
 	.cmd = op_name,						\
 },
 
-#define ZZZ_genl_ops		CONCAT_(GENL_MAGIC_FAMILY, _genl_ops)
+#define ZZZ_genl_ops		CONCATENATE(GENL_MAGIC_FAMILY, _genl_ops)
 static struct genl_ops ZZZ_genl_ops[] __read_mostly = {
 #include GENL_MAGIC_INCLUDE_FILE
 };
@@ -248,32 +250,32 @@ static struct genl_ops ZZZ_genl_ops[] __read_mostly = {
  * and provide register/unregister functions.
  *									{{{2
  */
-#define ZZZ_genl_family		CONCAT_(GENL_MAGIC_FAMILY, _genl_family)
+#define ZZZ_genl_family		CONCATENATE(GENL_MAGIC_FAMILY, _genl_family)
 static struct genl_family ZZZ_genl_family;
 /*
  * Magic: define multicast groups
  * Magic: define multicast group registration helper
  */
-#define ZZZ_genl_mcgrps		CONCAT_(GENL_MAGIC_FAMILY, _genl_mcgrps)
+#define ZZZ_genl_mcgrps		CONCATENATE(GENL_MAGIC_FAMILY, _genl_mcgrps)
 static const struct genl_multicast_group ZZZ_genl_mcgrps[] = {
 #undef GENL_mc_group
 #define GENL_mc_group(group) { .name = #group, },
 #include GENL_MAGIC_INCLUDE_FILE
 };
 
-enum CONCAT_(GENL_MAGIC_FAMILY, group_ids) {
+enum CONCATENATE(GENL_MAGIC_FAMILY, group_ids) {
 #undef GENL_mc_group
-#define GENL_mc_group(group) CONCAT_(GENL_MAGIC_FAMILY, _group_ ## group),
+#define GENL_mc_group(group) CONCATENATE(GENL_MAGIC_FAMILY, _group_ ## group),
 #include GENL_MAGIC_INCLUDE_FILE
 };
 
 #undef GENL_mc_group
 #define GENL_mc_group(group)						\
-static int CONCAT_(GENL_MAGIC_FAMILY, _genl_multicast_ ## group)(	\
+static int CONCATENATE(GENL_MAGIC_FAMILY, _genl_multicast_ ## group)(	\
 	struct sk_buff *skb, gfp_t flags)				\
 {									\
 	unsigned int group_id =						\
-		CONCAT_(GENL_MAGIC_FAMILY, _group_ ## group);		\
+		CONCATENATE(GENL_MAGIC_FAMILY, _group_ ## group);		\
 	return genlmsg_multicast(&ZZZ_genl_family, skb, 0,		\
 				 group_id, flags);			\
 }
@@ -289,8 +291,12 @@ static struct genl_family ZZZ_genl_family __ro_after_init = {
 #ifdef GENL_MAGIC_FAMILY_HDRSZ
 	.hdrsize = NLA_ALIGN(GENL_MAGIC_FAMILY_HDRSZ),
 #endif
-	.maxattr = ARRAY_SIZE(CONCAT_(GENL_MAGIC_FAMILY, _tla_nl_policy))-1,
-	.policy	= CONCAT_(GENL_MAGIC_FAMILY, _tla_nl_policy),
+	.maxattr = ARRAY_SIZE(CONCATENATE(GENL_MAGIC_FAMILY, _tla_nl_policy))-1,
+	.policy	= CONCATENATE(GENL_MAGIC_FAMILY, _tla_nl_policy),
+#ifdef GENL_MAGIC_FAMILY_PRE_DOIT
+	.pre_doit = GENL_MAGIC_FAMILY_PRE_DOIT,
+	.post_doit = GENL_MAGIC_FAMILY_POST_DOIT,
+#endif
 	.ops = ZZZ_genl_ops,
 	.n_ops = ARRAY_SIZE(ZZZ_genl_ops),
 	.mcgrps = ZZZ_genl_mcgrps,
@@ -299,12 +305,12 @@ static struct genl_family ZZZ_genl_family __ro_after_init = {
 	.module = THIS_MODULE,
 };
 
-int CONCAT_(GENL_MAGIC_FAMILY, _genl_register)(void)
+int CONCATENATE(GENL_MAGIC_FAMILY, _genl_register)(void)
 {
 	return genl_register_family(&ZZZ_genl_family);
 }
 
-void CONCAT_(GENL_MAGIC_FAMILY, _genl_unregister)(void)
+void CONCATENATE(GENL_MAGIC_FAMILY, _genl_unregister)(void)
 {
 	genl_unregister_family(&ZZZ_genl_family);
 }

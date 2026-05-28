@@ -26,13 +26,14 @@ Detection
 =========
 
 Intel processors may support either or both of the following hardware
-mechanisms to detect split locks and bus locks.
+mechanisms to detect split locks and bus locks. Some AMD processors also
+support bus lock detect.
 
 #AC exception for split lock detection
 --------------------------------------
 
 Beginning with the Tremont Atom CPU split lock operations may raise an
-Alignment Check (#AC) exception when a split lock operation is attemped.
+Alignment Check (#AC) exception when a split lock operation is attempted.
 
 #DB exception for bus lock detection
 ------------------------------------

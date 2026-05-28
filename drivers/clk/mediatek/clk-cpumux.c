@@ -53,6 +53,7 @@ static int clk_cpumux_set_parent(struct clk_hw *hw, u8 index)
 }
 
 static const struct clk_ops clk_cpumux_ops = {
+	.determine_rate = clk_hw_determine_rate_no_reparent,
 	.get_parent = clk_cpumux_get_parent,
 	.set_parent = clk_cpumux_set_parent,
 };
@@ -65,7 +66,7 @@ mtk_clk_register_cpumux(struct device *dev, const struct mtk_composite *mux,
 	int ret;
 	struct clk_init_data init;
 
-	cpumux = kzalloc(sizeof(*cpumux), GFP_KERNEL);
+	cpumux = kzalloc_obj(*cpumux);
 	if (!cpumux)
 		return ERR_PTR(-ENOMEM);
 

@@ -16,10 +16,10 @@
 #include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/xprtsock.h>
 #include <linux/sunrpc/svc.h>
-#include <linux/lockd/lockd.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
+#include "lockd.h"
 #include "netns.h"
 
 #define NLMDBG_FACILITY		NLMDBG_MONITOR
@@ -275,6 +275,9 @@ static struct nsm_handle *nsm_create_handle(const struct sockaddr *sap,
 					    const size_t hostname_len)
 {
 	struct nsm_handle *new;
+
+	if (!hostname)
+		return NULL;
 
 	new = kzalloc(sizeof(*new) + hostname_len + 1, GFP_KERNEL);
 	if (unlikely(new == NULL))

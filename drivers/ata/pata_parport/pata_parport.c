@@ -51,6 +51,13 @@ static void pata_parport_dev_select(struct ata_port *ap, unsigned int device)
 	ata_sff_pause(ap);
 }
 
+static void pata_parport_set_devctl(struct ata_port *ap, u8 ctl)
+{
+	struct pi_adapter *pi = ap->host->private_data;
+
+	pi->proto->write_regr(pi, 1, 6, ctl);
+}
+
 static bool pata_parport_devchk(struct ata_port *ap, unsigned int device)
 {
 	struct pi_adapter *pi = ap->host->private_data;
@@ -64,13 +71,79 @@ static bool pata_parport_devchk(struct ata_port *ap, unsigned int device)
 	pi->proto->write_regr(pi, 0, ATA_REG_NSECT, 0xaa);
 	pi->proto->write_regr(pi, 0, ATA_REG_LBAL, 0x55);
 
-	pi->proto->write_regr(pi, 0, ATA_REG_NSECT, 055);
+	pi->proto->write_regr(pi, 0, ATA_REG_NSECT, 0x55);
 	pi->proto->write_regr(pi, 0, ATA_REG_LBAL, 0xaa);
 
 	nsect = pi->proto->read_regr(pi, 0, ATA_REG_NSECT);
 	lbal = pi->proto->read_regr(pi, 0, ATA_REG_LBAL);
 
 	return (nsect == 0x55) && (lbal == 0xaa);
+}
+
+static int pata_parport_wait_after_reset(struct ata_link *link,
+					 unsigned int devmask,
+					 unsigned long deadline)
+{
+	struct ata_port *ap = link->ap;
+	struct pi_adapter *pi = ap->host->private_data;
+	unsigned int dev0 = devmask & (1 << 0);
+	unsigned int dev1 = devmask & (1 << 1);
+	int rc, ret = 0;
+
+	ata_msleep(ap, ATA_WAIT_AFTER_RESET);
+
+	/* always check readiness of the master device */
+	rc = ata_sff_wait_ready(link, deadline);
+	if (rc) {
+		/*
+		 * some adapters return bogus values if master device is not
+		 * present, so don't abort now if a slave device is present
+		 */
+		if (!dev1)
+			return rc;
+		ret = -ENODEV;
+	}
+
+	/*
+	 * if device 1 was found in ata_devchk, wait for register
+	 * access briefly, then wait for BSY to clear.
+	 */
+	if (dev1) {
+		int i;
+
+		pata_parport_dev_select(ap, 1);
+
+		/*
+		 * Wait for register access.  Some ATAPI devices fail
+		 * to set nsect/lbal after reset, so don't waste too
+		 * much time on it.  We're gonna wait for !BSY anyway.
+		 */
+		for (i = 0; i < 2; i++) {
+			u8 nsect, lbal;
+
+			nsect = pi->proto->read_regr(pi, 0, ATA_REG_NSECT);
+			lbal = pi->proto->read_regr(pi, 0, ATA_REG_LBAL);
+			if (nsect == 1 && lbal == 1)
+				break;
+			/* give drive a breather */
+			ata_msleep(ap, 50);
+		}
+
+		rc = ata_sff_wait_ready(link, deadline);
+		if (rc) {
+			if (rc != -ENODEV)
+				return rc;
+			ret = rc;
+		}
+	}
+
+	pata_parport_dev_select(ap, 0);
+	if (dev1)
+		pata_parport_dev_select(ap, 1);
+	if (dev0)
+		pata_parport_dev_select(ap, 0);
+
+	return ret;
 }
 
 static int pata_parport_bus_softreset(struct ata_port *ap, unsigned int devmask,
@@ -87,7 +160,7 @@ static int pata_parport_bus_softreset(struct ata_port *ap, unsigned int devmask,
 	ap->last_ctl = ap->ctl;
 
 	/* wait the port to become ready */
-	return ata_sff_wait_after_reset(&ap->link, devmask, deadline);
+	return pata_parport_wait_after_reset(&ap->link, devmask, deadline);
 }
 
 static int pata_parport_softreset(struct ata_link *link, unsigned int *classes,
@@ -248,10 +321,11 @@ static void pata_parport_drain_fifo(struct ata_queued_cmd *qc)
 static struct ata_port_operations pata_parport_port_ops = {
 	.inherits		= &ata_sff_port_ops,
 
-	.softreset		= pata_parport_softreset,
-	.hardreset		= NULL,
+	.reset.softreset	= pata_parport_softreset,
+	.reset.hardreset	= NULL,
 
 	.sff_dev_select		= pata_parport_dev_select,
+	.sff_set_devctl		= pata_parport_set_devctl,
 	.sff_check_status	= pata_parport_check_status,
 	.sff_check_altstatus	= pata_parport_check_altstatus,
 	.sff_tf_load		= pata_parport_tf_load,
@@ -385,19 +459,11 @@ static void pata_parport_dev_release(struct device *dev)
 	kfree(pi);
 }
 
-static void pata_parport_bus_release(struct device *dev)
-{
-	/* nothing to do here but required to avoid warning on device removal */
-}
-
-static struct bus_type pata_parport_bus_type = {
+static const struct bus_type pata_parport_bus_type = {
 	.name = DRV_NAME,
 };
 
-static struct device pata_parport_bus = {
-	.init_name = DRV_NAME,
-	.release = pata_parport_bus_release,
-};
+static struct device *pata_parport_bus;
 
 static const struct scsi_host_template pata_parport_sht = {
 	PATA_PARPORT_SHT("pata_parport")
@@ -437,14 +503,14 @@ static struct pi_adapter *pi_init_one(struct parport *parport,
 	if (id < 0)
 		return NULL;
 
-	pi = kzalloc(sizeof(struct pi_adapter), GFP_KERNEL);
+	pi = kzalloc_obj(struct pi_adapter);
 	if (!pi) {
 		ida_free(&pata_parport_bus_dev_ids, id);
 		return NULL;
 	}
 
 	/* set up pi->dev before pi_probe_unit() so it can use dev_printk() */
-	pi->dev.parent = &pata_parport_bus;
+	pi->dev.parent = pata_parport_bus;
 	pi->dev.bus = &pata_parport_bus_type;
 	pi->dev.driver = &pr->driver;
 	pi->dev.release = pata_parport_dev_release;
@@ -694,7 +760,6 @@ static struct parport_driver pata_parport_driver = {
 	.name = DRV_NAME,
 	.match_port = pata_parport_attach,
 	.detach = pata_parport_detach,
-	.devmodel = true,
 };
 
 static __init int pata_parport_init(void)
@@ -707,8 +772,9 @@ static __init int pata_parport_init(void)
 		return error;
 	}
 
-	error = device_register(&pata_parport_bus);
-	if (error) {
+	pata_parport_bus = root_device_register(DRV_NAME);
+	if (IS_ERR(pata_parport_bus)) {
+		error = PTR_ERR(pata_parport_bus);
 		pr_err("failed to register pata_parport bus, error: %d\n", error);
 		goto out_unregister_bus;
 	}
@@ -738,7 +804,7 @@ out_remove_del:
 out_remove_new:
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_new_device);
 out_unregister_dev:
-	device_unregister(&pata_parport_bus);
+	root_device_unregister(pata_parport_bus);
 out_unregister_bus:
 	bus_unregister(&pata_parport_bus_type);
 	return error;
@@ -749,7 +815,7 @@ static __exit void pata_parport_exit(void)
 	parport_unregister_driver(&pata_parport_driver);
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_new_device);
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_delete_device);
-	device_unregister(&pata_parport_bus);
+	root_device_unregister(pata_parport_bus);
 	bus_unregister(&pata_parport_bus_type);
 }
 

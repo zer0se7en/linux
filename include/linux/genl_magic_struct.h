@@ -14,28 +14,16 @@
 # error "you need to define GENL_MAGIC_INCLUDE_FILE before inclusion"
 #endif
 
-#include <linux/genetlink.h>
+#include <linux/args.h>
 #include <linux/types.h>
+#include <net/genetlink.h>
 
-#define CONCAT__(a,b)	a ## b
-#define CONCAT_(a,b)	CONCAT__(a,b)
-
-extern int CONCAT_(GENL_MAGIC_FAMILY, _genl_register)(void);
-extern void CONCAT_(GENL_MAGIC_FAMILY, _genl_unregister)(void);
+extern int CONCATENATE(GENL_MAGIC_FAMILY, _genl_register)(void);
+extern void CONCATENATE(GENL_MAGIC_FAMILY, _genl_unregister)(void);
 
 /*
  * Extension of genl attribute validation policies			{{{2
  */
-
-/*
- * @DRBD_GENLA_F_MANDATORY: By default, netlink ignores attributes it does not
- * know about.  This flag can be set in nlattr->nla_type to indicate that this
- * attribute must not be ignored.
- *
- * We check and remove this flag in drbd_nla_check_mandatory() before
- * validating the attribute types and lengths via nla_parse_nested().
- */
-#define DRBD_GENLA_F_MANDATORY (1 << 14)
 
 /*
  * Flags specific to drbd and not visible at the netlink layer, used in
@@ -54,7 +42,6 @@ extern void CONCAT_(GENL_MAGIC_FAMILY, _genl_unregister)(void);
 #define DRBD_F_SENSITIVE (1 << 1)
 #define DRBD_F_INVARIANT (1 << 2)
 
-#define __nla_type(x)	((__u16)((x) & NLA_TYPE_MASK & ~DRBD_GENLA_F_MANDATORY))
 
 /*									}}}1
  * MAGIC
@@ -160,12 +147,12 @@ enum {								\
 #undef __field
 #define __field(attr_nr, attr_flag, name, nla_type, type,	\
 		__get, __put, __is_signed)			\
-	T_ ## name = (__u16)(attr_nr | ((attr_flag) & DRBD_GENLA_F_MANDATORY)),
+	T_ ## name = (__u16)(attr_nr),
 
 #undef __array
 #define __array(attr_nr, attr_flag, name, nla_type, type,	\
 		maxlen, __get, __put, __is_signed)		\
-	T_ ## name = (__u16)(attr_nr | ((attr_flag) & DRBD_GENLA_F_MANDATORY)),
+	T_ ## name = (__u16)(attr_nr),
 
 #include GENL_MAGIC_INCLUDE_FILE
 

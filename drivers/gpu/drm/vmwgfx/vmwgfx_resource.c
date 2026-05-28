@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright 2009-2023 VMware, Inc., Palo Alto, CA., USA
+ * Copyright (c) 2009-2024 Broadcom. All Rights Reserved. The term
+ * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -58,6 +59,7 @@ void vmw_resource_mob_attach(struct vmw_resource *res)
 
 	rb_link_node(&res->mob_node, parent, new);
 	rb_insert_color(&res->mob_node, &gbo->res_tree);
+	vmw_bo_del_detached_resource(gbo, res);
 
 	vmw_bo_prio_add(gbo, res->used_prio);
 }
@@ -141,7 +143,7 @@ static void vmw_resource_release(struct kref *kref)
 		if (res->coherent)
 			vmw_bo_dirty_release(res->guest_memory_bo);
 		ttm_bo_unreserve(bo);
-		vmw_bo_unreference(&res->guest_memory_bo);
+		vmw_user_bo_unref(&res->guest_memory_bo);
 	}
 
 	if (likely(res->hw_destroy != NULL)) {
@@ -271,7 +273,7 @@ int vmw_user_resource_lookup_handle(struct vmw_private *dev_priv,
 		goto out_bad_resource;
 
 	res = converter->base_obj_to_res(base);
-	kref_get(&res->kref);
+	vmw_resource_reference(res);
 
 	*p_res = res;
 	ret = 0;
@@ -287,28 +289,35 @@ out_bad_resource:
  *
  * The pointer this pointed at by out_surf and out_buf needs to be null.
  */
-int vmw_user_lookup_handle(struct vmw_private *dev_priv,
+int vmw_user_object_lookup(struct vmw_private *dev_priv,
 			   struct drm_file *filp,
-			   uint32_t handle,
-			   struct vmw_surface **out_surf,
-			   struct vmw_bo **out_buf)
+			   u32 handle,
+			   struct vmw_user_object *uo)
 {
 	struct ttm_object_file *tfile = vmw_fpriv(filp)->tfile;
 	struct vmw_resource *res;
 	int ret;
 
-	BUG_ON(*out_surf || *out_buf);
+	WARN_ON(uo->surface || uo->buffer);
 
 	ret = vmw_user_resource_lookup_handle(dev_priv, tfile, handle,
 					      user_surface_converter,
 					      &res);
 	if (!ret) {
-		*out_surf = vmw_res_to_srf(res);
+		uo->surface = vmw_res_to_srf(res);
 		return 0;
 	}
 
-	*out_surf = NULL;
-	ret = vmw_user_bo_lookup(filp, handle, out_buf);
+	uo->surface = NULL;
+	ret = vmw_user_bo_lookup(filp, handle, &uo->buffer);
+	if (!ret && !uo->buffer->is_dumb) {
+		uo->surface = vmw_lookup_surface_for_buffer(dev_priv,
+							    uo->buffer,
+							    handle);
+		if (uo->surface)
+			vmw_user_bo_unref(&uo->buffer);
+	}
+
 	return ret;
 }
 
@@ -457,11 +466,11 @@ void vmw_resource_unreserve(struct vmw_resource *res,
 			vmw_resource_mob_detach(res);
 			if (res->coherent)
 				vmw_bo_dirty_release(res->guest_memory_bo);
-			vmw_bo_unreference(&res->guest_memory_bo);
+			vmw_user_bo_unref(&res->guest_memory_bo);
 		}
 
 		if (new_guest_memory_bo) {
-			res->guest_memory_bo = vmw_bo_reference(new_guest_memory_bo);
+			res->guest_memory_bo = vmw_user_bo_ref(new_guest_memory_bo);
 
 			/*
 			 * The validation code should already have added a
@@ -522,9 +531,9 @@ vmw_resource_check_buffer(struct ww_acquire_ctx *ticket,
 	}
 
 	INIT_LIST_HEAD(&val_list);
-	ttm_bo_get(&res->guest_memory_bo->tbo);
 	val_buf->bo = &res->guest_memory_bo->tbo;
 	val_buf->num_shared = 0;
+	drm_gem_object_get(&val_buf->bo->base);
 	list_add_tail(&val_buf->head, &val_list);
 	ret = ttm_eu_reserve_buffers(ticket, &val_list, interruptible, NULL);
 	if (unlikely(ret != 0))
@@ -548,10 +557,10 @@ vmw_resource_check_buffer(struct ww_acquire_ctx *ticket,
 out_no_validate:
 	ttm_eu_backoff_reservation(ticket, &val_list);
 out_no_reserve:
-	ttm_bo_put(val_buf->bo);
+	drm_gem_object_put(&val_buf->bo->base);
 	val_buf->bo = NULL;
 	if (guest_memory_dirty)
-		vmw_bo_unreference(&res->guest_memory_bo);
+		vmw_user_bo_unref(&res->guest_memory_bo);
 
 	return ret;
 }
@@ -610,7 +619,7 @@ vmw_resource_backoff_reservation(struct ww_acquire_ctx *ticket,
 	INIT_LIST_HEAD(&val_list);
 	list_add_tail(&val_buf->head, &val_list);
 	ttm_eu_backoff_reservation(ticket, &val_list);
-	ttm_bo_put(val_buf->bo);
+	drm_gem_object_put(&val_buf->bo->base);
 	val_buf->bo = NULL;
 }
 
@@ -727,7 +736,7 @@ int vmw_resource_validate(struct vmw_resource *res, bool intr,
 		goto out_no_validate;
 	else if (!res->func->needs_guest_memory && res->guest_memory_bo) {
 		WARN_ON_ONCE(vmw_resource_mob_attached(res));
-		vmw_bo_unreference(&res->guest_memory_bo);
+		vmw_user_bo_unref(&res->guest_memory_bo);
 	}
 
 	return 0;
@@ -1064,6 +1073,22 @@ void vmw_resource_dirty_update(struct vmw_resource *res, pgoff_t start,
 					   end << PAGE_SHIFT);
 }
 
+int vmw_resource_clean(struct vmw_resource *res)
+{
+	int ret = 0;
+
+	if (res->res_dirty) {
+		if (!res->func->clean)
+			return -EINVAL;
+
+		ret = res->func->clean(res);
+		if (ret)
+			return ret;
+		res->res_dirty = false;
+	}
+	return ret;
+}
+
 /**
  * vmw_resources_clean - Clean resources intersecting a mob range
  * @vbo: The mob buffer object
@@ -1080,6 +1105,7 @@ int vmw_resources_clean(struct vmw_bo *vbo, pgoff_t start,
 	unsigned long res_start = start << PAGE_SHIFT;
 	unsigned long res_end = end << PAGE_SHIFT;
 	unsigned long last_cleaned = 0;
+	int ret;
 
 	/*
 	 * Find the resource with lowest backup_offset that intersects the
@@ -1106,18 +1132,9 @@ int vmw_resources_clean(struct vmw_bo *vbo, pgoff_t start,
 	 * intersecting the range.
 	 */
 	while (found) {
-		if (found->res_dirty) {
-			int ret;
-
-			if (!found->func->clean)
-				return -EINVAL;
-
-			ret = found->func->clean(found);
-			if (ret)
-				return ret;
-
-			found->res_dirty = false;
-		}
+		ret = vmw_resource_clean(found);
+		if (ret)
+			return ret;
 		last_cleaned = found->guest_memory_offset + found->guest_memory_size;
 		cur = rb_next(&found->mob_node);
 		if (!cur)

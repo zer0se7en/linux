@@ -5,12 +5,12 @@
 #include <linux/seq_file.h>
 #include <linux/shrinker.h>
 #include <linux/memcontrol.h>
-#include <linux/srcu.h>
+
+#include "internal.h"
 
 /* defined in vmscan.c */
 extern struct mutex shrinker_mutex;
 extern struct list_head shrinker_list;
-extern struct srcu_struct shrinker_srcu;
 
 static DEFINE_IDA(shrinker_debugfs_ida);
 static struct dentry *shrinker_debugfs_root;
@@ -51,13 +51,13 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 	struct mem_cgroup *memcg;
 	unsigned long total;
 	bool memcg_aware;
-	int ret = 0, nid, srcu_idx;
+	int ret = 0, nid;
 
 	count_per_node = kcalloc(nr_node_ids, sizeof(unsigned long), GFP_KERNEL);
 	if (!count_per_node)
 		return -ENOMEM;
 
-	srcu_idx = srcu_read_lock(&shrinker_srcu);
+	rcu_read_lock();
 
 	memcg_aware = shrinker->flags & SHRINKER_MEMCG_AWARE;
 
@@ -70,7 +70,7 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 					       memcg_aware ? memcg : NULL,
 					       count_per_node);
 		if (total) {
-			seq_printf(m, "%lu", mem_cgroup_ino(memcg));
+			seq_printf(m, "%llu", mem_cgroup_id(memcg));
 			for_each_node(nid)
 				seq_printf(m, " %lu", count_per_node[nid]);
 			seq_putc(m, '\n');
@@ -88,7 +88,7 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 		}
 	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
 
-	srcu_read_unlock(&shrinker_srcu, srcu_idx);
+	rcu_read_unlock();
 
 	kfree(count_per_node);
 	return ret;
@@ -106,20 +106,21 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 					   size_t size, loff_t *pos)
 {
 	struct shrinker *shrinker = file->private_data;
-	unsigned long nr_to_scan = 0, ino, read_len;
+	unsigned long nr_to_scan = 0, read_len;
+	u64 id;
 	struct shrink_control sc = {
 		.gfp_mask = GFP_KERNEL,
 	};
 	struct mem_cgroup *memcg = NULL;
-	int nid, srcu_idx;
+	int nid;
 	char kbuf[72];
 
-	read_len = size < (sizeof(kbuf) - 1) ? size : (sizeof(kbuf) - 1);
+	read_len = min(size, sizeof(kbuf) - 1);
 	if (copy_from_user(kbuf, buf, read_len))
 		return -EFAULT;
 	kbuf[read_len] = '\0';
 
-	if (sscanf(kbuf, "%lu %d %lu", &ino, &nid, &nr_to_scan) != 3)
+	if (sscanf(kbuf, "%llu %d %lu", &id, &nid, &nr_to_scan) != 3)
 		return -EINVAL;
 
 	if (nid < 0 || nid >= nr_node_ids)
@@ -129,19 +130,17 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 		return size;
 
 	if (shrinker->flags & SHRINKER_MEMCG_AWARE) {
-		memcg = mem_cgroup_get_from_ino(ino);
-		if (!memcg || IS_ERR(memcg))
+		memcg = mem_cgroup_get_from_id(id);
+		if (!memcg)
 			return -ENOENT;
 
 		if (!mem_cgroup_online(memcg)) {
 			mem_cgroup_put(memcg);
 			return -ENOENT;
 		}
-	} else if (ino != 0) {
+	} else if (id != 0) {
 		return -EINVAL;
 	}
-
-	srcu_idx = srcu_read_lock(&shrinker_srcu);
 
 	sc.nid = nid;
 	sc.memcg = memcg;
@@ -150,7 +149,6 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 
 	shrinker->scan_objects(shrinker, &sc);
 
-	srcu_read_unlock(&shrinker_srcu, srcu_idx);
 	mem_cgroup_put(memcg);
 
 	return size;
@@ -198,8 +196,6 @@ int shrinker_debugfs_add(struct shrinker *shrinker)
 
 int shrinker_debugfs_rename(struct shrinker *shrinker, const char *fmt, ...)
 {
-	struct dentry *entry;
-	char buf[128];
 	const char *new, *old;
 	va_list ap;
 	int ret = 0;
@@ -216,22 +212,16 @@ int shrinker_debugfs_rename(struct shrinker *shrinker, const char *fmt, ...)
 	old = shrinker->name;
 	shrinker->name = new;
 
-	if (shrinker->debugfs_entry) {
-		snprintf(buf, sizeof(buf), "%s-%d", shrinker->name,
-			 shrinker->debugfs_id);
+	ret = debugfs_change_name(shrinker->debugfs_entry, "%s-%d",
+			shrinker->name, shrinker->debugfs_id);
 
-		entry = debugfs_rename(shrinker_debugfs_root,
-				       shrinker->debugfs_entry,
-				       shrinker_debugfs_root, buf);
-		if (IS_ERR(entry))
-			ret = PTR_ERR(entry);
-		else
-			shrinker->debugfs_entry = entry;
+	if (ret) {
+		shrinker->name = old;
+		kfree_const(new);
+	} else {
+		kfree_const(old);
 	}
-
 	mutex_unlock(&shrinker_mutex);
-
-	kfree_const(old);
 
 	return ret;
 }
@@ -243,9 +233,6 @@ struct dentry *shrinker_debugfs_detach(struct shrinker *shrinker,
 	struct dentry *entry = shrinker->debugfs_entry;
 
 	lockdep_assert_held(&shrinker_mutex);
-
-	kfree_const(shrinker->name);
-	shrinker->name = NULL;
 
 	*debugfs_id = entry ? shrinker->debugfs_id : -1;
 	shrinker->debugfs_entry = NULL;

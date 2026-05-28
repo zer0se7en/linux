@@ -6,6 +6,7 @@
 
 #include <linux/acpi.h>
 #include <linux/device.h>
+#include <linux/gpio/consumer.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
@@ -322,15 +323,15 @@ static int cs42l42_sdw_read_prop(struct sdw_slave *peripheral)
 	prop->scp_int1_mask = SDW_SCP_INT1_BUS_CLASH | SDW_SCP_INT1_PARITY;
 
 	/* DP1 - capture */
-	ports[0].num = CS42L42_SDW_CAPTURE_PORT,
-	ports[0].type = SDW_DPN_FULL,
-	ports[0].ch_prep_timeout = 10,
+	ports[0].num = CS42L42_SDW_CAPTURE_PORT;
+	ports[0].type = SDW_DPN_FULL;
+	ports[0].ch_prep_timeout = 10;
 	prop->src_dpn_prop = &ports[0];
 
 	/* DP2 - playback */
-	ports[1].num = CS42L42_SDW_PLAYBACK_PORT,
-	ports[1].type = SDW_DPN_FULL,
-	ports[1].ch_prep_timeout = 10,
+	ports[1].num = CS42L42_SDW_PLAYBACK_PORT;
+	ports[1].type = SDW_DPN_FULL;
+	ports[1].ch_prep_timeout = 10;
 	prop->sink_dpn_prop = &ports[1];
 
 	return 0;
@@ -344,6 +345,16 @@ static int cs42l42_sdw_update_status(struct sdw_slave *peripheral,
 	switch (status) {
 	case SDW_SLAVE_ATTACHED:
 		dev_dbg(cs42l42->dev, "ATTACHED\n");
+
+		/*
+		 * The SoundWire core can report stale ATTACH notifications
+		 * if we hard-reset CS42L42 in probe() but it had already been
+		 * enumerated. Reject the ATTACH if we haven't yet seen an
+		 * UNATTACH report for the device being in reset.
+		 */
+		if (cs42l42->sdw_waiting_first_unattach)
+			break;
+
 		/*
 		 * Initialise codec, this only needs to be done once.
 		 * When resuming from suspend, resume callback will handle re-init of codec,
@@ -354,6 +365,16 @@ static int cs42l42_sdw_update_status(struct sdw_slave *peripheral,
 		break;
 	case SDW_SLAVE_UNATTACHED:
 		dev_dbg(cs42l42->dev, "UNATTACHED\n");
+
+		if (cs42l42->sdw_waiting_first_unattach) {
+			/*
+			 * SoundWire core has seen that CS42L42 is not on
+			 * the bus so release RESET and wait for ATTACH.
+			 */
+			cs42l42->sdw_waiting_first_unattach = false;
+			gpiod_set_value_cansleep(cs42l42->reset_gpio, 1);
+		}
+
 		break;
 	default:
 		break;
@@ -390,7 +411,7 @@ static const struct sdw_slave_ops cs42l42_sdw_ops = {
 	.port_prep = cs42l42_sdw_port_prep,
 };
 
-static int __maybe_unused cs42l42_sdw_runtime_suspend(struct device *dev)
+static int cs42l42_sdw_runtime_suspend(struct device *dev)
 {
 	struct cs42l42_private *cs42l42 = dev_get_drvdata(dev);
 
@@ -405,11 +426,11 @@ static int __maybe_unused cs42l42_sdw_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static const struct reg_sequence __maybe_unused cs42l42_soft_reboot_seq[] = {
+static const struct reg_sequence cs42l42_soft_reboot_seq[] = {
 	REG_SEQ0(CS42L42_SOFT_RESET_REBOOT, 0x1e),
 };
 
-static int __maybe_unused cs42l42_sdw_handle_unattach(struct cs42l42_private *cs42l42)
+static int cs42l42_sdw_handle_unattach(struct cs42l42_private *cs42l42)
 {
 	struct sdw_slave *peripheral = cs42l42->sdw_peripheral;
 
@@ -439,7 +460,7 @@ static int __maybe_unused cs42l42_sdw_handle_unattach(struct cs42l42_private *cs
 	return 0;
 }
 
-static int __maybe_unused cs42l42_sdw_runtime_resume(struct device *dev)
+static int cs42l42_sdw_runtime_resume(struct device *dev)
 {
 	static const unsigned int ts_dbnce_ms[] = { 0, 125, 250, 500, 750, 1000, 1250, 1500};
 	struct cs42l42_private *cs42l42 = dev_get_drvdata(dev);
@@ -470,7 +491,7 @@ static int __maybe_unused cs42l42_sdw_runtime_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused cs42l42_sdw_resume(struct device *dev)
+static int cs42l42_sdw_resume(struct device *dev)
 {
 	struct cs42l42_private *cs42l42 = dev_get_drvdata(dev);
 	int ret;
@@ -564,19 +585,17 @@ static int cs42l42_sdw_probe(struct sdw_slave *peripheral, const struct sdw_devi
 	return 0;
 }
 
-static int cs42l42_sdw_remove(struct sdw_slave *peripheral)
+static void cs42l42_sdw_remove(struct sdw_slave *peripheral)
 {
 	struct cs42l42_private *cs42l42 = dev_get_drvdata(&peripheral->dev);
 
 	cs42l42_common_remove(cs42l42);
 	pm_runtime_disable(cs42l42->dev);
-
-	return 0;
 }
 
 static const struct dev_pm_ops cs42l42_sdw_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(cs42l42_suspend, cs42l42_sdw_resume)
-	SET_RUNTIME_PM_OPS(cs42l42_sdw_runtime_suspend, cs42l42_sdw_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(cs42l42_suspend, cs42l42_sdw_resume)
+	RUNTIME_PM_OPS(cs42l42_sdw_runtime_suspend, cs42l42_sdw_runtime_resume, NULL)
 };
 
 static const struct sdw_device_id cs42l42_sdw_id[] = {
@@ -588,7 +607,7 @@ MODULE_DEVICE_TABLE(sdw, cs42l42_sdw_id);
 static struct sdw_driver cs42l42_sdw_driver = {
 	.driver = {
 		.name = "cs42l42-sdw",
-		.pm = &cs42l42_sdw_pm,
+		.pm = pm_ptr(&cs42l42_sdw_pm),
 	},
 	.probe = cs42l42_sdw_probe,
 	.remove = cs42l42_sdw_remove,
@@ -601,4 +620,4 @@ module_sdw_driver(cs42l42_sdw_driver);
 MODULE_DESCRIPTION("ASoC CS42L42 SoundWire driver");
 MODULE_AUTHOR("Richard Fitzgerald <rf@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(SND_SOC_CS42L42_CORE);
+MODULE_IMPORT_NS("SND_SOC_CS42L42_CORE");

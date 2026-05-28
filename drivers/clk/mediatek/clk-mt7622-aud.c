@@ -8,7 +8,7 @@
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
 #include "clk-mtk.h"
@@ -75,6 +75,7 @@ static const struct mtk_gate audio_clks[] = {
 	GATE_AUDIO1(CLK_AUDIO_A1SYS, "audio_a1sys", "a1sys_hp_sel", 21),
 	GATE_AUDIO1(CLK_AUDIO_A2SYS, "audio_a2sys", "a2sys_hp_sel", 22),
 	GATE_AUDIO1(CLK_AUDIO_AFE_CONN, "audio_afe_conn", "a1sys_hp_sel", 23),
+	GATE_AUDIO1(CLK_AUDIO_AFE_MRGIF, "audio_afe_mrgif", "aud_mux1_sel", 25),
 	/* AUDIO2 */
 	GATE_AUDIO2(CLK_AUDIO_UL1, "audio_ul1", "a1sys_hp_sel", 0),
 	GATE_AUDIO2(CLK_AUDIO_UL2, "audio_ul2", "a1sys_hp_sel", 1),
@@ -135,10 +136,10 @@ err_plat_populate:
 	return r;
 }
 
-static int clk_mt7622_aud_remove(struct platform_device *pdev)
+static void clk_mt7622_aud_remove(struct platform_device *pdev)
 {
 	of_platform_depopulate(&pdev->dev);
-	return mtk_clk_simple_remove(pdev);
+	mtk_clk_simple_remove(pdev);
 }
 
 static const struct of_device_id of_match_clk_mt7622_aud[] = {
@@ -156,4 +157,6 @@ static struct platform_driver clk_mt7622_aud_drv = {
 	},
 };
 module_platform_driver(clk_mt7622_aud_drv);
+
+MODULE_DESCRIPTION("MediaTek MT7622 audio clocks driver");
 MODULE_LICENSE("GPL");

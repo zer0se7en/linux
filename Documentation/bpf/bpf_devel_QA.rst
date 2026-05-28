@@ -382,6 +382,14 @@ In case of new BPF instructions, once the changes have been accepted
 into the Linux kernel, please implement support into LLVM's BPF back
 end. See LLVM_ section below for further information.
 
+Q: What "BPF_INTERNAL" symbol namespace is for?
+-----------------------------------------------
+A: Symbols exported as BPF_INTERNAL can only be used by BPF infrastructure
+like preload kernel modules with light skeleton. Most symbols outside
+of BPF_INTERNAL are not expected to be used by code outside of BPF either.
+Symbols may lack the designation because they predate the namespaces,
+or due to an oversight.
+
 Stable submission
 =================
 
@@ -603,9 +611,10 @@ Q: I have added a new BPF instruction to the kernel, how can I integrate
 it into LLVM?
 
 A: LLVM has a ``-mcpu`` selector for the BPF back end in order to allow
-the selection of BPF instruction set extensions. By default the
-``generic`` processor target is used, which is the base instruction set
-(v1) of BPF.
+the selection of BPF instruction set extensions. Before llvm version 20,
+the ``generic`` processor target is used, which is the base instruction
+set (v1) of BPF. Since llvm 20, the default processor target has changed
+to instruction set v3.
 
 LLVM has an option to select ``-mcpu=probe`` where it will probe the host
 kernel for supported BPF instruction set extensions and selects the
@@ -635,12 +644,12 @@ test coverage.
 
 Q: clang flag for target bpf?
 -----------------------------
-Q: In some cases clang flag ``-target bpf`` is used but in other cases the
+Q: In some cases clang flag ``--target=bpf`` is used but in other cases the
 default clang target, which matches the underlying architecture, is used.
 What is the difference and when I should use which?
 
 A: Although LLVM IR generation and optimization try to stay architecture
-independent, ``-target <arch>`` still has some impact on generated code:
+independent, ``--target=<arch>`` still has some impact on generated code:
 
 - BPF program may recursively include header file(s) with file scope
   inline assembly codes. The default target can handle this well,
@@ -658,7 +667,7 @@ independent, ``-target <arch>`` still has some impact on generated code:
   The clang option ``-fno-jump-tables`` can be used to disable
   switch table generation.
 
-- For clang ``-target bpf``, it is guaranteed that pointer or long /
+- For clang ``--target=bpf``, it is guaranteed that pointer or long /
   unsigned long types will always have a width of 64 bit, no matter
   whether underlying clang binary or default target (or kernel) is
   32 bit. However, when native clang target is used, then it will
@@ -668,7 +677,7 @@ independent, ``-target <arch>`` still has some impact on generated code:
   while the BPF LLVM back end still operates in 64 bit. The native
   target is mostly needed in tracing for the case of walking ``pt_regs``
   or other kernel structures where CPU's register width matters.
-  Otherwise, ``clang -target bpf`` is generally recommended.
+  Otherwise, ``clang --target=bpf`` is generally recommended.
 
 You should use default target when:
 
@@ -685,7 +694,7 @@ when:
   into these structures is verified by the BPF verifier and may result
   in verification failures if the native architecture is not aligned with
   the BPF architecture, e.g. 64-bit. An example of this is
-  BPF_PROG_TYPE_SK_MSG require ``-target bpf``
+  BPF_PROG_TYPE_SK_MSG require ``--target=bpf``
 
 
 .. Links

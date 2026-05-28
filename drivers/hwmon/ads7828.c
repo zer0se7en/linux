@@ -18,7 +18,7 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_data/ads7828.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -62,8 +62,8 @@ static ssize_t ads7828_in_show(struct device *dev,
 	if (err < 0)
 		return err;
 
-	return sprintf(buf, "%d\n",
-		       DIV_ROUND_CLOSEST(regval * data->lsb_resol, 1000));
+	return sysfs_emit(buf, "%d\n",
+			  DIV_ROUND_CLOSEST(regval * data->lsb_resol, 1000));
 }
 
 static SENSOR_DEVICE_ATTR_RO(in0_input, ads7828_in, 0);
@@ -98,8 +98,6 @@ static const struct regmap_config ads2830_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 };
-
-static const struct i2c_device_id ads7828_device_ids[];
 
 static int ads7828_probe(struct i2c_client *client)
 {
@@ -138,11 +136,7 @@ static int ads7828_probe(struct i2c_client *client)
 		}
 	}
 
-	if (client->dev.of_node)
-		chip = (enum ads7828_chips)
-			of_device_get_match_data(&client->dev);
-	else
-		chip = i2c_match_id(ads7828_device_ids, client)->driver_data;
+	chip = (uintptr_t)i2c_get_match_data(client);
 
 	/* Bound Vref with min/max values */
 	vref_mv = clamp_val(vref_mv, ADS7828_EXT_VREF_MV_MIN,
@@ -208,7 +202,7 @@ static struct i2c_driver ads7828_driver = {
 	},
 
 	.id_table = ads7828_device_ids,
-	.probe_new = ads7828_probe,
+	.probe = ads7828_probe,
 };
 
 module_i2c_driver(ads7828_driver);

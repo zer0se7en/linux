@@ -184,7 +184,7 @@ err_irq:
 }
 
 
-static int ehci_hcd_ppc_of_remove(struct platform_device *op)
+static void ehci_hcd_ppc_of_remove(struct platform_device *op)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(op);
 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
@@ -216,8 +216,6 @@ static int ehci_hcd_ppc_of_remove(struct platform_device *op)
 		}
 	}
 	usb_put_hcd(hcd);
-
-	return 0;
 }
 
 

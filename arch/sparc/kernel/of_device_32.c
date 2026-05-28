@@ -7,8 +7,8 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/irq.h>
-#include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <asm/leon.h>
 #include <asm/leon_amba.h>
@@ -340,7 +340,7 @@ static void __init build_device_resources(struct platform_device *op,
 static struct platform_device * __init scan_one_device(struct device_node *dp,
 						 struct device *parent)
 {
-	struct platform_device *op = kzalloc(sizeof(*op), GFP_KERNEL);
+	struct platform_device *op = kzalloc_obj(*op);
 	const struct linux_prom_irqs *intr;
 	struct dev_archdata *sd;
 	int len, i;
@@ -387,6 +387,7 @@ static struct platform_device * __init scan_one_device(struct device_node *dp,
 
 	if (of_device_register(op)) {
 		printk("%pOF: Could not register of device.\n", dp);
+		put_device(&op->dev);
 		kfree(op);
 		op = NULL;
 	}

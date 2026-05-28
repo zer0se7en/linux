@@ -13,7 +13,7 @@
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pmbus.h>
 
 #include "pmbus.h"
@@ -58,7 +58,7 @@ enum {
 	CFFPS_DEBUGFS_NUM_ENTRIES
 };
 
-enum versions { cffps1, cffps2, cffps_unknown };
+enum versions { cffps_unknown, cffps1, cffps2 };
 
 struct ibm_cffps {
 	enum versions version;
@@ -482,19 +482,9 @@ MODULE_DEVICE_TABLE(i2c, ibm_cffps_id);
 static int ibm_cffps_probe(struct i2c_client *client)
 {
 	int i, rc;
-	enum versions vs = cffps_unknown;
+	enum versions vs = (uintptr_t)i2c_get_match_data(client);
 	struct dentry *debugfs;
 	struct ibm_cffps *psu;
-	const void *md = of_device_get_match_data(&client->dev);
-	const struct i2c_device_id *id;
-
-	if (md) {
-		vs = (enum versions)md;
-	} else {
-		id = i2c_match_id(ibm_cffps_id, client);
-		if (id)
-			vs = (enum versions)id->driver_data;
-	}
 
 	if (vs == cffps_unknown) {
 		u16 ccin_revision = 0;
@@ -534,7 +524,7 @@ static int ibm_cffps_probe(struct i2c_client *client)
 		}
 
 		/* Set the client name to include the version number. */
-		snprintf(client->name, I2C_NAME_SIZE, "cffps%d", vs + 1);
+		snprintf(client->name, I2C_NAME_SIZE, "cffps%d", vs);
 	}
 
 	client->dev.platform_data = &ibm_cffps_pdata;
@@ -605,7 +595,7 @@ static struct i2c_driver ibm_cffps_driver = {
 		.name = "ibm-cffps",
 		.of_match_table = ibm_cffps_of_match,
 	},
-	.probe_new = ibm_cffps_probe,
+	.probe = ibm_cffps_probe,
 	.id_table = ibm_cffps_id,
 };
 
@@ -614,4 +604,4 @@ module_i2c_driver(ibm_cffps_driver);
 MODULE_AUTHOR("Eddie James");
 MODULE_DESCRIPTION("PMBus driver for IBM Common Form Factor power supplies");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(PMBUS);
+MODULE_IMPORT_NS("PMBUS");

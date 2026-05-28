@@ -13,8 +13,6 @@
 #include <linux/gpio/driver.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/pinctrl/pinconf-generic.h>
 #include <linux/pinctrl/pinconf.h>
@@ -360,9 +358,7 @@ static int armada_37xx_pmx_set_by_name(struct pinctrl_dev *pctldev,
 
 	val = grp->val[func];
 
-	regmap_update_bits(info->regmap, reg, mask, val);
-
-	return 0;
+	return regmap_update_bits(info->regmap, reg, mask, val);
 }
 
 static int armada_37xx_pmx_set(struct pinctrl_dev *pctldev,
@@ -404,10 +400,13 @@ static int armada_37xx_gpio_get_direction(struct gpio_chip *chip,
 	struct armada_37xx_pinctrl *info = gpiochip_get_data(chip);
 	unsigned int reg = OUTPUT_EN;
 	unsigned int val, mask;
+	int ret;
 
 	armada_37xx_update_reg(&reg, &offset);
 	mask = BIT(offset);
-	regmap_read(info->regmap, reg, &val);
+	ret = regmap_read(info->regmap, reg, &val);
+	if (ret)
+		return ret;
 
 	if (val & mask)
 		return GPIO_LINE_DIRECTION_OUT;
@@ -419,22 +418,23 @@ static int armada_37xx_gpio_direction_output(struct gpio_chip *chip,
 					     unsigned int offset, int value)
 {
 	struct armada_37xx_pinctrl *info = gpiochip_get_data(chip);
-	unsigned int reg = OUTPUT_EN;
-	unsigned int mask, val, ret;
+	unsigned int en_offset = offset;
+	unsigned int reg = OUTPUT_VAL;
+	unsigned int mask, val;
+	int ret;
 
 	armada_37xx_update_reg(&reg, &offset);
 	mask = BIT(offset);
+	val = value ? mask : 0;
 
-	ret = regmap_update_bits(info->regmap, reg, mask, mask);
-
+	ret = regmap_update_bits(info->regmap, reg, mask, val);
 	if (ret)
 		return ret;
 
-	reg = OUTPUT_VAL;
-	val = value ? mask : 0;
-	regmap_update_bits(info->regmap, reg, mask, val);
+	reg = OUTPUT_EN;
+	armada_37xx_update_reg(&reg, &en_offset);
 
-	return 0;
+	return regmap_update_bits(info->regmap, reg, mask, mask);
 }
 
 static int armada_37xx_gpio_get(struct gpio_chip *chip, unsigned int offset)
@@ -442,17 +442,20 @@ static int armada_37xx_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	struct armada_37xx_pinctrl *info = gpiochip_get_data(chip);
 	unsigned int reg = INPUT_VAL;
 	unsigned int val, mask;
+	int ret;
 
 	armada_37xx_update_reg(&reg, &offset);
 	mask = BIT(offset);
 
-	regmap_read(info->regmap, reg, &val);
+	ret = regmap_read(info->regmap, reg, &val);
+	if (ret)
+		return ret;
 
 	return (val & mask) != 0;
 }
 
-static void armada_37xx_gpio_set(struct gpio_chip *chip, unsigned int offset,
-				 int value)
+static int armada_37xx_gpio_set(struct gpio_chip *chip, unsigned int offset,
+				int value)
 {
 	struct armada_37xx_pinctrl *info = gpiochip_get_data(chip);
 	unsigned int reg = OUTPUT_VAL;
@@ -462,7 +465,7 @@ static void armada_37xx_gpio_set(struct gpio_chip *chip, unsigned int offset,
 	mask = BIT(offset);
 	val = value ? mask : 0;
 
-	regmap_update_bits(info->regmap, reg, mask, val);
+	return regmap_update_bits(info->regmap, reg, mask, val);
 }
 
 static int armada_37xx_pmx_gpio_set_direction(struct pinctrl_dev *pctldev,
@@ -471,16 +474,17 @@ static int armada_37xx_pmx_gpio_set_direction(struct pinctrl_dev *pctldev,
 {
 	struct armada_37xx_pinctrl *info = pinctrl_dev_get_drvdata(pctldev);
 	struct gpio_chip *chip = range->gc;
+	int ret;
 
 	dev_dbg(info->dev, "gpio_direction for pin %u as %s-%d to %s\n",
 		offset, range->name, offset, input ? "input" : "output");
 
 	if (input)
-		armada_37xx_gpio_direction_input(chip, offset);
+		ret = armada_37xx_gpio_direction_input(chip, offset);
 	else
-		armada_37xx_gpio_direction_output(chip, offset, 0);
+		ret = armada_37xx_gpio_direction_output(chip, offset, 0);
 
-	return 0;
+	return ret;
 }
 
 static int armada_37xx_gpio_request_enable(struct pinctrl_dev *pctldev,
@@ -631,8 +635,9 @@ static int armada_37xx_edge_both_irq_swap_pol(struct armada_37xx_pinctrl *info,
 {
 	u32 reg_idx = pin_idx / GPIO_PER_REG;
 	u32 bit_num = pin_idx % GPIO_PER_REG;
-	u32 p, l, ret;
 	unsigned long flags;
+	u32 p, l;
+	int ret;
 
 	regmap_read(info->regmap, INPUT_VAL + 4*reg_idx, &l);
 
@@ -736,7 +741,7 @@ static void armada_37xx_irq_print_chip(struct irq_data *d, struct seq_file *p)
 	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
 	struct armada_37xx_pinctrl *info = gpiochip_get_data(chip);
 
-	seq_printf(p, info->data->name);
+	seq_puts(p, info->data->name);
 }
 
 static const struct irq_chip armada_37xx_irqchip = {
@@ -836,8 +841,6 @@ static int armada_37xx_gpiochip_register(struct platform_device *pdev,
 static int armada_37xx_add_function(struct armada_37xx_pmx_func *funcs,
 				    int *funcsize, const char *name)
 {
-	int i = 0;
-
 	if (*funcsize <= 0)
 		return -EOVERFLOW;
 
@@ -849,7 +852,6 @@ static int armada_37xx_add_function(struct armada_37xx_pmx_func *funcs,
 			return -EEXIST;
 		}
 		funcs++;
-		i++;
 	}
 
 	/* append new unique function */
@@ -1013,7 +1015,6 @@ static int armada_37xx_pinctrl_register(struct platform_device *pdev,
 	return 0;
 }
 
-#if defined(CONFIG_PM)
 static int armada_3700_pinctrl_suspend(struct device *dev)
 {
 	struct armada_37xx_pinctrl *info = dev_get_drvdata(dev);
@@ -1107,15 +1108,8 @@ static int armada_3700_pinctrl_resume(struct device *dev)
  * Since pinctrl is an infrastructure module, its resume should be issued prior
  * to other IO drivers.
  */
-static const struct dev_pm_ops armada_3700_pinctrl_pm_ops = {
-	.suspend_noirq = armada_3700_pinctrl_suspend,
-	.resume_noirq = armada_3700_pinctrl_resume,
-};
-
-#define PINCTRL_ARMADA_37XX_DEV_PM_OPS (&armada_3700_pinctrl_pm_ops)
-#else
-#define PINCTRL_ARMADA_37XX_DEV_PM_OPS NULL
-#endif /* CONFIG_PM */
+static DEFINE_NOIRQ_DEV_PM_OPS(armada_3700_pinctrl_pm_ops,
+			       armada_3700_pinctrl_suspend, armada_3700_pinctrl_resume);
 
 static const struct of_device_id armada_37xx_pinctrl_of_match[] = {
 	{
@@ -1182,7 +1176,7 @@ static struct platform_driver armada_37xx_pinctrl_driver = {
 	.driver = {
 		.name = "armada-37xx-pinctrl",
 		.of_match_table = armada_37xx_pinctrl_of_match,
-		.pm = PINCTRL_ARMADA_37XX_DEV_PM_OPS,
+		.pm = pm_sleep_ptr(&armada_3700_pinctrl_pm_ops),
 	},
 };
 

@@ -38,7 +38,7 @@ extern char uevent_helper[];
 #endif
 
 /* counter to tag the uevent, read only except for the kobject core */
-extern u64 uevent_seqnum;
+extern atomic64_t uevent_seqnum;
 
 /*
  * The actions here must match the index to the string array
@@ -69,14 +69,16 @@ struct kobject {
 	const struct kobj_type	*ktype;
 	struct kernfs_node	*sd; /* sysfs directory entry */
 	struct kref		kref;
-#ifdef CONFIG_DEBUG_KOBJECT_RELEASE
-	struct delayed_work	release;
-#endif
+
 	unsigned int state_initialized:1;
 	unsigned int state_in_sysfs:1;
 	unsigned int state_add_uevent_sent:1;
 	unsigned int state_remove_uevent_sent:1;
 	unsigned int uevent_suppress:1;
+
+#ifdef CONFIG_DEBUG_KOBJECT_RELEASE
+	struct delayed_work	release;
+#endif
 };
 
 __printf(2, 3) int kobject_set_name(struct kobject *kobj, const char *name, ...);
@@ -107,7 +109,7 @@ struct kobject *kobject_get(struct kobject *kobj);
 struct kobject * __must_check kobject_get_unless_zero(struct kobject *kobj);
 void kobject_put(struct kobject *kobj);
 
-const void *kobject_namespace(const struct kobject *kobj);
+const struct ns_common *kobject_namespace(const struct kobject *kobj);
 void kobject_get_ownership(const struct kobject *kobj, kuid_t *uid, kgid_t *gid);
 char *kobject_get_path(const struct kobject *kobj, gfp_t flag);
 
@@ -116,7 +118,7 @@ struct kobj_type {
 	const struct sysfs_ops *sysfs_ops;
 	const struct attribute_group **default_groups;
 	const struct kobj_ns_type_operations *(*child_ns_type)(const struct kobject *kobj);
-	const void *(*namespace)(const struct kobject *kobj);
+	const struct ns_common *(*namespace)(const struct kobject *kobj);
 	void (*get_ownership)(const struct kobject *kobj, kuid_t *uid, kgid_t *gid);
 };
 

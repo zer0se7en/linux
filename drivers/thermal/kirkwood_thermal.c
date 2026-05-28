@@ -48,7 +48,7 @@ static int kirkwood_get_temp(struct thermal_zone_device *thermal,
 	return 0;
 }
 
-static struct thermal_zone_device_ops ops = {
+static const struct thermal_zone_device_ops ops = {
 	.get_temp = kirkwood_get_temp,
 };
 
@@ -71,8 +71,8 @@ static int kirkwood_thermal_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->sensor))
 		return PTR_ERR(priv->sensor);
 
-	thermal = thermal_zone_device_register("kirkwood_thermal", 0, 0,
-					       priv, &ops, NULL, 0, 0);
+	thermal = thermal_tripless_zone_device_register("kirkwood_thermal",
+							priv, &ops, NULL);
 	if (IS_ERR(thermal)) {
 		dev_err(&pdev->dev,
 			"Failed to register thermal zone device\n");
@@ -90,14 +90,12 @@ static int kirkwood_thermal_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int kirkwood_thermal_exit(struct platform_device *pdev)
+static void kirkwood_thermal_exit(struct platform_device *pdev)
 {
 	struct thermal_zone_device *kirkwood_thermal =
 		platform_get_drvdata(pdev);
 
 	thermal_zone_device_unregister(kirkwood_thermal);
-
-	return 0;
 }
 
 MODULE_DEVICE_TABLE(of, kirkwood_thermal_id_table);

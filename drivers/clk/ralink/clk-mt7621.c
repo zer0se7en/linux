@@ -354,7 +354,7 @@ static void __init mt7621_clk_init(struct device_node *node)
 	struct clk_hw_onecell_data *clk_data;
 	int ret, i, count;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return;
 
@@ -372,7 +372,7 @@ static void __init mt7621_clk_init(struct device_node *node)
 
 	count = ARRAY_SIZE(mt7621_clks_base) +
 		ARRAY_SIZE(mt7621_fixed_clks) + ARRAY_SIZE(mt7621_gates);
-	clk_data = kzalloc(struct_size(clk_data, hws, count), GFP_KERNEL);
+	clk_data = kzalloc_flex(*clk_data, hws, count);
 	if (!clk_data)
 		goto free_clk_priv;
 
@@ -521,6 +521,7 @@ static int mt7621_clk_probe(struct platform_device *pdev)
 				GFP_KERNEL);
 	if (!clk_data)
 		return -ENOMEM;
+	clk_data->num = count;
 
 	for (i = 0; i < ARRAY_SIZE(mt7621_clks_base); i++)
 		clk_data->hws[i] = mt7621_clk_early[i];
@@ -536,8 +537,6 @@ static int mt7621_clk_probe(struct platform_device *pdev)
 		dev_err(dev, "Couldn't register fixed clock gates\n");
 		goto unreg_clk_fixed;
 	}
-
-	clk_data->num = count;
 
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, clk_data);
 	if (ret) {

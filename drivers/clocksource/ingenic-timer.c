@@ -286,8 +286,7 @@ static int __init ingenic_tcu_init(struct device_node *np)
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
-	tcu = kzalloc(struct_size(tcu, timers, num_possible_cpus()),
-		      GFP_KERNEL);
+	tcu = kzalloc_flex(*tcu, timers, num_possible_cpus());
 	if (!tcu)
 		return -ENOMEM;
 
@@ -369,7 +368,7 @@ static int __init ingenic_tcu_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused ingenic_tcu_suspend(struct device *dev)
+static int ingenic_tcu_suspend(struct device *dev)
 {
 	struct ingenic_tcu *tcu = dev_get_drvdata(dev);
 	unsigned int cpu;
@@ -382,7 +381,7 @@ static int __maybe_unused ingenic_tcu_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused ingenic_tcu_resume(struct device *dev)
+static int ingenic_tcu_resume(struct device *dev)
 {
 	struct ingenic_tcu *tcu = dev_get_drvdata(dev);
 	unsigned int cpu;
@@ -406,7 +405,7 @@ err_timer_clk_disable:
 	return ret;
 }
 
-static const struct dev_pm_ops __maybe_unused ingenic_tcu_pm_ops = {
+static const struct dev_pm_ops ingenic_tcu_pm_ops = {
 	/* _noirq: We want the TCU clocks to be gated last / ungated first */
 	.suspend_noirq = ingenic_tcu_suspend,
 	.resume_noirq  = ingenic_tcu_resume,
@@ -415,9 +414,7 @@ static const struct dev_pm_ops __maybe_unused ingenic_tcu_pm_ops = {
 static struct platform_driver ingenic_tcu_driver = {
 	.driver = {
 		.name	= "ingenic-tcu-timer",
-#ifdef CONFIG_PM_SLEEP
-		.pm	= &ingenic_tcu_pm_ops,
-#endif
+		.pm	= pm_sleep_ptr(&ingenic_tcu_pm_ops),
 		.of_match_table = ingenic_tcu_of_match,
 	},
 };

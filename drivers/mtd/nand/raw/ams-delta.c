@@ -22,7 +22,7 @@
 #include <linux/mtd/nand-gpio.h>
 #include <linux/mtd/rawnand.h>
 #include <linux/mtd/partitions.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/sizes.h>
 
@@ -432,7 +432,7 @@ MODULE_DEVICE_TABLE(platform, gpio_nand_plat_id_table);
 
 static struct platform_driver gpio_nand_driver = {
 	.probe		= gpio_nand_probe,
-	.remove_new	= gpio_nand_remove,
+	.remove		= gpio_nand_remove,
 	.id_table	= gpio_nand_plat_id_table,
 	.driver		= {
 		.name	= "ams-delta-nand",

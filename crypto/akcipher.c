@@ -10,12 +10,28 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/scatterlist.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <net/netlink.h>
 
 #include "internal.h"
+
+#define CRYPTO_ALG_TYPE_AHASH_MASK	0x0000000e
+
+struct crypto_akcipher_sync_data {
+	struct crypto_akcipher *tfm;
+	const void *src;
+	void *dst;
+	unsigned int slen;
+	unsigned int dlen;
+
+	struct akcipher_request *req;
+	struct crypto_wait cwait;
+	struct scatterlist sg;
+	u8 *buf;
+};
 
 static int __maybe_unused crypto_akcipher_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
@@ -30,10 +46,8 @@ static int __maybe_unused crypto_akcipher_report(
 		       sizeof(rakcipher), &rakcipher);
 }
 
-static void crypto_akcipher_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
-
-static void crypto_akcipher_show(struct seq_file *m, struct crypto_alg *alg)
+static void __maybe_unused crypto_akcipher_show(struct seq_file *m,
+						struct crypto_alg *alg)
 {
 	seq_puts(m, "type         : akcipher\n");
 }
@@ -67,30 +81,6 @@ static void crypto_akcipher_free_instance(struct crypto_instance *inst)
 	akcipher->free(akcipher);
 }
 
-static int __maybe_unused crypto_akcipher_report_stat(
-	struct sk_buff *skb, struct crypto_alg *alg)
-{
-	struct akcipher_alg *akcipher = __crypto_akcipher_alg(alg);
-	struct crypto_istat_akcipher *istat;
-	struct crypto_stat_akcipher rakcipher;
-
-	istat = akcipher_get_stat(akcipher);
-
-	memset(&rakcipher, 0, sizeof(rakcipher));
-
-	strscpy(rakcipher.type, "akcipher", sizeof(rakcipher.type));
-	rakcipher.stat_encrypt_cnt = atomic64_read(&istat->encrypt_cnt);
-	rakcipher.stat_encrypt_tlen = atomic64_read(&istat->encrypt_tlen);
-	rakcipher.stat_decrypt_cnt = atomic64_read(&istat->decrypt_cnt);
-	rakcipher.stat_decrypt_tlen = atomic64_read(&istat->decrypt_tlen);
-	rakcipher.stat_sign_cnt = atomic64_read(&istat->sign_cnt);
-	rakcipher.stat_verify_cnt = atomic64_read(&istat->verify_cnt);
-	rakcipher.stat_err_cnt = atomic64_read(&istat->err_cnt);
-
-	return nla_put(skb, CRYPTOCFGA_STAT_AKCIPHER,
-		       sizeof(rakcipher), &rakcipher);
-}
-
 static const struct crypto_type crypto_akcipher_type = {
 	.extsize = crypto_alg_extsize,
 	.init_tfm = crypto_akcipher_init_tfm,
@@ -101,13 +91,11 @@ static const struct crypto_type crypto_akcipher_type = {
 #if IS_ENABLED(CONFIG_CRYPTO_USER)
 	.report = crypto_akcipher_report,
 #endif
-#ifdef CONFIG_CRYPTO_STATS
-	.report_stat = crypto_akcipher_report_stat,
-#endif
 	.maskclear = ~CRYPTO_ALG_TYPE_MASK,
-	.maskset = CRYPTO_ALG_TYPE_MASK,
+	.maskset = CRYPTO_ALG_TYPE_AHASH_MASK,
 	.type = CRYPTO_ALG_TYPE_AKCIPHER,
 	.tfmsize = offsetof(struct crypto_akcipher, base),
+	.algsize = offsetof(struct akcipher_alg, base),
 };
 
 int crypto_grab_akcipher(struct crypto_akcipher_spawn *spawn,
@@ -128,15 +116,11 @@ EXPORT_SYMBOL_GPL(crypto_alloc_akcipher);
 
 static void akcipher_prepare_alg(struct akcipher_alg *alg)
 {
-	struct crypto_istat_akcipher *istat = akcipher_get_stat(alg);
 	struct crypto_alg *base = &alg->base;
 
 	base->cra_type = &crypto_akcipher_type;
 	base->cra_flags &= ~CRYPTO_ALG_TYPE_MASK;
 	base->cra_flags |= CRYPTO_ALG_TYPE_AKCIPHER;
-
-	if (IS_ENABLED(CONFIG_CRYPTO_STATS))
-		memset(istat, 0, sizeof(*istat));
 }
 
 static int akcipher_default_op(struct akcipher_request *req)
@@ -154,10 +138,6 @@ int crypto_register_akcipher(struct akcipher_alg *alg)
 {
 	struct crypto_alg *base = &alg->base;
 
-	if (!alg->sign)
-		alg->sign = akcipher_default_op;
-	if (!alg->verify)
-		alg->verify = akcipher_default_op;
 	if (!alg->encrypt)
 		alg->encrypt = akcipher_default_op;
 	if (!alg->decrypt)
@@ -185,6 +165,90 @@ int akcipher_register_instance(struct crypto_template *tmpl,
 	return crypto_register_instance(tmpl, akcipher_crypto_instance(inst));
 }
 EXPORT_SYMBOL_GPL(akcipher_register_instance);
+
+static int crypto_akcipher_sync_prep(struct crypto_akcipher_sync_data *data)
+{
+	unsigned int reqsize = crypto_akcipher_reqsize(data->tfm);
+	struct akcipher_request *req;
+	struct scatterlist *sg;
+	unsigned int mlen;
+	unsigned int len;
+	u8 *buf;
+
+	mlen = max(data->slen, data->dlen);
+
+	len = sizeof(*req) + reqsize + mlen;
+	if (len < mlen)
+		return -EOVERFLOW;
+
+	req = kzalloc(len, GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	data->req = req;
+	akcipher_request_set_tfm(req, data->tfm);
+
+	buf = (u8 *)(req + 1) + reqsize;
+	data->buf = buf;
+	memcpy(buf, data->src, data->slen);
+
+	sg = &data->sg;
+	sg_init_one(sg, buf, mlen);
+	akcipher_request_set_crypt(req, sg, sg, data->slen, data->dlen);
+
+	crypto_init_wait(&data->cwait);
+	akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_SLEEP,
+				      crypto_req_done, &data->cwait);
+
+	return 0;
+}
+
+static int crypto_akcipher_sync_post(struct crypto_akcipher_sync_data *data,
+				     int err)
+{
+	err = crypto_wait_req(err, &data->cwait);
+	memcpy(data->dst, data->buf, data->dlen);
+	data->dlen = data->req->dst_len;
+	kfree_sensitive(data->req);
+	return err;
+}
+
+int crypto_akcipher_sync_encrypt(struct crypto_akcipher *tfm,
+				 const void *src, unsigned int slen,
+				 void *dst, unsigned int dlen)
+{
+	struct crypto_akcipher_sync_data data = {
+		.tfm = tfm,
+		.src = src,
+		.dst = dst,
+		.slen = slen,
+		.dlen = dlen,
+	};
+
+	return crypto_akcipher_sync_prep(&data) ?:
+	       crypto_akcipher_sync_post(&data,
+					 crypto_akcipher_encrypt(data.req));
+}
+EXPORT_SYMBOL_GPL(crypto_akcipher_sync_encrypt);
+
+int crypto_akcipher_sync_decrypt(struct crypto_akcipher *tfm,
+				 const void *src, unsigned int slen,
+				 void *dst, unsigned int dlen)
+{
+	struct crypto_akcipher_sync_data data = {
+		.tfm = tfm,
+		.src = src,
+		.dst = dst,
+		.slen = slen,
+		.dlen = dlen,
+	};
+
+	return crypto_akcipher_sync_prep(&data) ?:
+	       crypto_akcipher_sync_post(&data,
+					 crypto_akcipher_decrypt(data.req)) ?:
+	       data.dlen;
+}
+EXPORT_SYMBOL_GPL(crypto_akcipher_sync_decrypt);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Generic public key cipher type");

@@ -59,7 +59,7 @@ static void serial8250_em_serial_out_helper(struct uart_port *p, int offset,
 	}
 }
 
-static unsigned int serial8250_em_serial_in(struct uart_port *p, int offset)
+static u32 serial8250_em_serial_in(struct uart_port *p, unsigned int offset)
 {
 	switch (offset) {
 	case UART_RX: /* RX @ 0x00 */
@@ -119,7 +119,7 @@ static void serial8250_em_reg_update(struct uart_port *p, int off, int value)
 	serial8250_em_serial_out_helper(p, UART_HCR0_EM, hcr0);
 }
 
-static void serial8250_em_serial_out(struct uart_port *p, int offset, int value)
+static void serial8250_em_serial_out(struct uart_port *p, unsigned int offset, u32 value)
 {
 	switch (offset) {
 	case UART_TX:
@@ -139,12 +139,12 @@ static void serial8250_em_serial_out(struct uart_port *p, int offset, int value)
 	}
 }
 
-static int serial8250_em_serial_dl_read(struct uart_8250_port *up)
+static u32 serial8250_em_serial_dl_read(struct uart_8250_port *up)
 {
 	return serial_in(up, UART_DLL_EM) | serial_in(up, UART_DLM_EM) << 8;
 }
 
-static void serial8250_em_serial_dl_write(struct uart_8250_port *up, int value)
+static void serial8250_em_serial_dl_write(struct uart_8250_port *up, u32 value)
 {
 	serial_out(up, UART_DLL_EM, value & 0xff);
 	serial_out(up, UART_DLM_EM, value >> 8 & 0xff);
@@ -200,12 +200,11 @@ static int serial8250_em_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int serial8250_em_remove(struct platform_device *pdev)
+static void serial8250_em_remove(struct platform_device *pdev)
 {
 	struct serial8250_em_priv *priv = platform_get_drvdata(pdev);
 
 	serial8250_unregister_port(priv->line);
-	return 0;
 }
 
 static const struct of_device_id serial8250_em_dt_ids[] = {

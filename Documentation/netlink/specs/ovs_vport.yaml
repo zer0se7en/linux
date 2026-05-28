@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
-
+---
 name: ovs_vport
 version: 2
 protocol: genetlink-legacy
+uapi-header: linux/openvswitch.h
 
-doc:
+doc: >-
   OVS vport configuration over generic netlink.
 
 definitions:
@@ -18,9 +19,11 @@ definitions:
   -
     name: vport-type
     type: enum
-    entries: [ unspec, netdev, internal, gre, vxlan, geneve ]
+    enum-name: ovs-vport-type
+    name-prefix: ovs-vport-type-
+    entries: [unspec, netdev, internal, gre, vxlan, geneve]
   -
-    name: vport-stats
+    name: ovs-vport-stats
     type: struct
     members:
       -
@@ -51,6 +54,8 @@ definitions:
 attribute-sets:
   -
     name: vport-options
+    enum-name: ovs-vport-options
+    name-prefix: ovs-tunnel-attr-
     attributes:
       -
         name: dst-port
@@ -60,6 +65,8 @@ attribute-sets:
         type: u32
   -
     name: upcall-stats
+    enum-name: ovs-vport-upcall-attr
+    name-prefix: ovs-vport-upcall-attr-
     attributes:
       -
         name: success
@@ -70,7 +77,13 @@ attribute-sets:
         type: u64
   -
     name: vport
+    name-prefix: ovs-vport-attr-
+    enum-name: ovs-vport-attr
     attributes:
+      -
+        name: unspec
+        type: unused
+        value: 0
       -
         name: port-no
         type: u32
@@ -92,7 +105,7 @@ attribute-sets:
       -
         name: stats
         type: binary
-        struct: vport-stats
+        struct: ovs-vport-stats
       -
         name: pad
         type: unused
@@ -108,21 +121,41 @@ attribute-sets:
         nested-attributes: upcall-stats
 
 operations:
+  name-prefix: ovs-vport-cmd-
+  fixed-header: ovs-header
   list:
     -
-      name: vport-get
-      doc: Get / dump OVS vport configuration and state
-      value: 3
+      name: new
+      doc: Create a new OVS vport
       attribute-set: vport
-      fixed-header: ovs-header
+      do:
+        request:
+          attributes:
+            - name
+            - type
+            - upcall-pid
+            - ifindex
+            - options
+    -
+      name: del
+      doc: Delete existing OVS vport from a data path
+      attribute-set: vport
+      do:
+        request:
+          attributes:
+            - port-no
+            - type
+            - name
+    -
+      name: get
+      doc: Get / dump OVS vport configuration and state
+      attribute-set: vport
       do: &vport-get-op
         request:
           attributes:
-            - dp-ifindex
             - name
         reply: &dev-all
           attributes:
-            - dp-ifindex
             - port-no
             - type
             - name

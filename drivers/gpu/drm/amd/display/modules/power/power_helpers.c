@@ -31,7 +31,7 @@
 
 #define DIV_ROUNDUP(a, b) (((a)+((b)/2))/(b))
 #define bswap16_based_on_endian(big_endian, value) \
-	(big_endian) ? cpu_to_be16(value) : cpu_to_le16(value)
+	((big_endian) ? cpu_to_be16(value) : cpu_to_le16(value))
 
 /* Possible Min Reduction config from least aggressive to most aggressive
  *  0    1     2     3     4     5     6     7     8     9     10    11   12
@@ -114,6 +114,27 @@ static const struct abm_parameters * const abm_settings[] = {
 	abm_settings_config0,
 	abm_settings_config1,
 	abm_settings_config2,
+};
+
+static const struct dm_bl_data_point custom_backlight_curve0[] = {
+		{2, 14}, {4, 16}, {6, 18}, {8, 21}, {10, 23}, {12, 26}, {14, 29}, {16, 32}, {18, 35},
+		{20, 38}, {22, 41}, {24, 44}, {26, 48}, {28, 52}, {30, 55}, {32, 59}, {34, 62},
+		{36, 67}, {38, 71}, {40, 75}, {42, 80}, {44, 84}, {46, 88}, {48, 93}, {50, 98},
+		{52, 103}, {54, 108}, {56, 113}, {58, 118}, {60, 123}, {62, 129}, {64, 135}, {66, 140},
+		{68, 146}, {70, 152}, {72, 158}, {74, 164}, {76, 171}, {78, 177}, {80, 183}, {82, 190},
+		{84, 197}, {86, 204}, {88, 211}, {90, 218}, {92, 225}, {94, 232}, {96, 240}, {98, 247}};
+
+struct custom_backlight_profile {
+	uint8_t  ac_level_percentage;
+	uint8_t  dc_level_percentage;
+	uint8_t  min_input_signal;
+	uint8_t  max_input_signal;
+	uint8_t  num_data_points;
+	const struct dm_bl_data_point *data_points;
+};
+
+static const struct custom_backlight_profile custom_backlight_profiles[] = {
+		{100, 32, 12, 255, ARRAY_SIZE(custom_backlight_curve0), custom_backlight_curve0},
 };
 
 #define NUM_AMBI_LEVEL    5
@@ -229,10 +250,12 @@ static void fill_backlight_transform_table(struct dmcu_iram_parameters params,
 	unsigned int lut_index;
 
 	table->backlight_thresholds[0] = 0;
-	table->backlight_offsets[0] = params.backlight_lut_array[0];
+	ASSERT(params.backlight_lut_array[0] <= 0xFFFF);
+	table->backlight_offsets[0] = (uint16_t)params.backlight_lut_array[0];
 	table->backlight_thresholds[num_entries-1] = 0xFFFF;
+	ASSERT(params.backlight_lut_array[params.backlight_lut_array_size - 1] <= 0xFFFF);
 	table->backlight_offsets[num_entries-1] =
-		params.backlight_lut_array[params.backlight_lut_array_size - 1];
+		(uint16_t)params.backlight_lut_array[params.backlight_lut_array_size - 1];
 
 	/* Setup all brightness levels between 0% and 100% exclusive
 	 * Fills brightness-to-backlight transform table. Backlight custom curve
@@ -244,12 +267,17 @@ static void fill_backlight_transform_table(struct dmcu_iram_parameters params,
 	 */
 	for (i = 1; i+1 < num_entries; i++) {
 		lut_index = (params.backlight_lut_array_size - 1) * i / (num_entries - 1);
+
 		ASSERT(lut_index < params.backlight_lut_array_size);
 
-		table->backlight_thresholds[i] =
-			cpu_to_be16(DIV_ROUNDUP((i * 65536), num_entries));
-		table->backlight_offsets[i] =
-			cpu_to_be16(params.backlight_lut_array[lut_index]);
+		unsigned int threshold_val = DIV_ROUNDUP((i * 65536), num_entries);
+		unsigned int offset_val = params.backlight_lut_array[lut_index];
+
+		ASSERT(threshold_val <= 0xFFFF);
+		ASSERT(offset_val <= 0xFFFF);
+
+		table->backlight_thresholds[i] = cpu_to_be16((uint16_t)threshold_val);
+		table->backlight_offsets[i]    = cpu_to_be16((uint16_t)offset_val);
 	}
 }
 
@@ -261,10 +289,12 @@ static void fill_backlight_transform_table_v_2_2(struct dmcu_iram_parameters par
 	unsigned int lut_index;
 
 	table->backlight_thresholds[0] = 0;
-	table->backlight_offsets[0] = params.backlight_lut_array[0];
+	ASSERT(params.backlight_lut_array[0] <= 0xFFFF);
+	table->backlight_offsets[0] = (uint16_t)params.backlight_lut_array[0];
 	table->backlight_thresholds[num_entries-1] = 0xFFFF;
+	ASSERT(params.backlight_lut_array[params.backlight_lut_array_size - 1] <= 0xFFFF);
 	table->backlight_offsets[num_entries-1] =
-		params.backlight_lut_array[params.backlight_lut_array_size - 1];
+		(uint16_t)params.backlight_lut_array[params.backlight_lut_array_size - 1];
 
 	/* Setup all brightness levels between 0% and 100% exclusive
 	 * Fills brightness-to-backlight transform table. Backlight custom curve
@@ -278,12 +308,16 @@ static void fill_backlight_transform_table_v_2_2(struct dmcu_iram_parameters par
 		lut_index = DIV_ROUNDUP((i * params.backlight_lut_array_size), num_entries);
 		ASSERT(lut_index < params.backlight_lut_array_size);
 
+		unsigned int threshold_val = DIV_ROUNDUP((i * 65536), num_entries);
+		unsigned int offset_val = params.backlight_lut_array[lut_index];
+
+		ASSERT(threshold_val <= 0xFFFF);
+		ASSERT(offset_val <= 0xFFFF);
+
 		table->backlight_thresholds[i] = (big_endian) ?
-			cpu_to_be16(DIV_ROUNDUP((i * 65536), num_entries)) :
-			cpu_to_le16(DIV_ROUNDUP((i * 65536), num_entries));
+			cpu_to_be16((uint16_t)threshold_val) : cpu_to_le16((uint16_t)threshold_val);
 		table->backlight_offsets[i] = (big_endian) ?
-			cpu_to_be16(params.backlight_lut_array[lut_index]) :
-			cpu_to_le16(params.backlight_lut_array[lut_index]);
+			cpu_to_be16((uint16_t)offset_val) : cpu_to_le16((uint16_t)offset_val);
 	}
 }
 
@@ -719,16 +753,19 @@ bool dmub_init_abm_config(struct resource_pool *res_pool,
 	}
 
 	if (params.backlight_ramping_override) {
+
+		ASSERT(params.backlight_ramping_reduction <= 0xFFFF);
+		ASSERT(params.backlight_ramping_start <= 0xFFFF);
 		for (i = 0; i < NUM_AGGR_LEVEL; i++) {
-			config.blRampReduction[i] = params.backlight_ramping_reduction;
-			config.blRampStart[i] = params.backlight_ramping_start;
-			}
-		} else {
-			for (i = 0; i < NUM_AGGR_LEVEL; i++) {
-				config.blRampReduction[i] = abm_settings[set][i].blRampReduction;
-				config.blRampStart[i] = abm_settings[set][i].blRampStart;
-				}
-			}
+			config.blRampReduction[i] = (uint16_t)params.backlight_ramping_reduction;
+			config.blRampStart[i]     = (uint16_t)params.backlight_ramping_start;
+		}
+	} else {
+		for (i = 0; i < NUM_AGGR_LEVEL; i++) {
+			config.blRampReduction[i] = abm_settings[set][i].blRampReduction;
+			config.blRampStart[i] = abm_settings[set][i].blRampStart;
+		}
+	}
 
 	config.min_abm_backlight = ram_table.min_abm_backlight;
 
@@ -818,6 +855,10 @@ bool is_psr_su_specific_panel(struct dc_link *link)
 				((dpcd_caps->sink_dev_id_str[1] == 0x08 && dpcd_caps->sink_dev_id_str[0] == 0x08) ||
 				(dpcd_caps->sink_dev_id_str[1] == 0x08 && dpcd_caps->sink_dev_id_str[0] == 0x07)))
 				isPSRSUSupported = false;
+			else if (dpcd_caps->sink_dev_id_str[1] == 0x08 && dpcd_caps->sink_dev_id_str[0] == 0x03)
+				isPSRSUSupported = false;
+			else if (dpcd_caps->sink_dev_id_str[1] == 0x08 && dpcd_caps->sink_dev_id_str[0] == 0x01)
+				isPSRSUSupported = false;
 			else if (dpcd_caps->psr_info.force_psrsu_cap == 0x1)
 				isPSRSUSupported = true;
 		}
@@ -905,6 +946,11 @@ void mod_power_calc_psr_configs(struct psr_config *psr_config,
 		!link->dpcd_caps.psr_info.psr_dpcd_caps.bits.LINK_TRAINING_ON_EXIT_NOT_REQUIRED;
 }
 
+void init_replay_config(struct dc_link *link, struct replay_config *pr_config)
+{
+	link->replay_settings.config = *pr_config;
+}
+
 bool mod_power_only_edp(const struct dc_state *context, const struct dc_stream_state *stream)
 {
 	return context && context->stream_count == 1 && dc_is_embedded_signal(stream->signal);
@@ -918,11 +964,11 @@ bool psr_su_set_dsc_slice_height(struct dc *dc, struct dc_link *link,
 	uint16_t slice_height;
 
 	config->dsc_slice_height = 0;
-	if ((link->connector_signal & SIGNAL_TYPE_EDP) &&
-	    (!dc->caps.edp_dsc_support ||
+	if (!(link->connector_signal & SIGNAL_TYPE_EDP) ||
+	    !dc->caps.edp_dsc_support ||
 	    link->panel_config.dsc.disable_dsc_edp ||
 	    !link->dpcd_caps.dsc_caps.dsc_basic_caps.fields.dsc_support.DSC_SUPPORT ||
-	    !stream->timing.dsc_cfg.num_slices_v))
+	    !stream->timing.dsc_cfg.num_slices_v)
 		return true;
 
 	pic_height = stream->timing.v_addressable +
@@ -943,4 +989,116 @@ bool psr_su_set_dsc_slice_height(struct dc *dc, struct dc_link *link,
 	}
 
 	return true;
+}
+
+void set_replay_frame_skip_number(struct dc_link *link,
+	enum replay_coasting_vtotal_type type,
+	uint32_t coasting_vtotal_refresh_rate_mhz,
+	uint32_t flicker_free_refresh_rate_mhz,
+	bool is_defer)
+{
+	uint32_t *frame_skip_number_array = NULL;
+	uint32_t frame_skip_number = 0;
+
+	if (link == NULL)
+		return;
+
+	if (false == link->replay_settings.config.frame_skip_supported)
+		return;
+
+	if (flicker_free_refresh_rate_mhz == 0 || coasting_vtotal_refresh_rate_mhz == 0)
+		return;
+
+	if (is_defer)
+		frame_skip_number_array = link->replay_settings.defer_frame_skip_number_table;
+	else
+		frame_skip_number_array = link->replay_settings.frame_skip_number_table;
+
+	if (frame_skip_number_array == NULL)
+		return;
+
+	frame_skip_number = coasting_vtotal_refresh_rate_mhz / flicker_free_refresh_rate_mhz;
+
+	if (frame_skip_number >= 1)
+		frame_skip_number_array[type] = frame_skip_number - 1;
+	else
+		frame_skip_number_array[type] = 0;
+}
+
+void set_replay_defer_update_coasting_vtotal(struct dc_link *link,
+	enum replay_coasting_vtotal_type type,
+	uint32_t vtotal)
+{
+	link->replay_settings.defer_update_coasting_vtotal_table[type] = vtotal;
+}
+
+void update_replay_coasting_vtotal_from_defer(struct dc_link *link,
+	enum replay_coasting_vtotal_type type)
+{
+	link->replay_settings.coasting_vtotal_table[type] =
+		link->replay_settings.defer_update_coasting_vtotal_table[type];
+	link->replay_settings.frame_skip_number_table[type] =
+		link->replay_settings.defer_frame_skip_number_table[type];
+}
+
+void set_replay_coasting_vtotal(struct dc_link *link,
+	enum replay_coasting_vtotal_type type,
+	uint32_t vtotal)
+{
+	link->replay_settings.coasting_vtotal_table[type] = vtotal;
+}
+
+void set_replay_low_rr_full_screen_video_src_vtotal(struct dc_link *link, uint16_t vtotal)
+{
+	link->replay_settings.low_rr_full_screen_video_pseudo_vtotal = vtotal;
+}
+
+void calculate_replay_link_off_frame_count(struct dc_link *link,
+	uint16_t vtotal, uint16_t htotal)
+{
+	uint8_t max_link_off_frame_count = 0;
+	uint16_t max_deviation_line = 0,  pixel_deviation_per_line = 0;
+
+	if (!link || link->replay_settings.config.replay_version != DC_FREESYNC_REPLAY)
+		return;
+
+	max_deviation_line = link->dpcd_caps.pr_info.max_deviation_line;
+	pixel_deviation_per_line = link->dpcd_caps.pr_info.pixel_deviation_per_line;
+
+	if (htotal != 0 && vtotal != 0 && pixel_deviation_per_line != 0)
+		max_link_off_frame_count = htotal * max_deviation_line / (pixel_deviation_per_line * vtotal);
+	else
+		ASSERT(0);
+
+	link->replay_settings.link_off_frame_count = max_link_off_frame_count;
+}
+
+bool fill_custom_backlight_caps(unsigned int config_no, struct dm_acpi_atif_backlight_caps *caps)
+{
+	unsigned int data_points_size;
+	uint64_t caps_size;
+
+	if (config_no >= ARRAY_SIZE(custom_backlight_profiles))
+		return false;
+
+	data_points_size = custom_backlight_profiles[config_no].num_data_points
+			* sizeof(custom_backlight_profiles[config_no].data_points[0]);
+
+	caps_size = sizeof(struct dm_acpi_atif_backlight_caps) - sizeof(caps->data_points) + data_points_size;
+	ASSERT(caps_size <= 0xFFFF);
+	caps->size = (uint16_t)caps_size;
+	caps->flags = 0;
+	caps->error_code = 0;
+	caps->ac_level_percentage = custom_backlight_profiles[config_no].ac_level_percentage;
+	caps->dc_level_percentage = custom_backlight_profiles[config_no].dc_level_percentage;
+	caps->min_input_signal = custom_backlight_profiles[config_no].min_input_signal;
+	caps->max_input_signal = custom_backlight_profiles[config_no].max_input_signal;
+	caps->num_data_points = custom_backlight_profiles[config_no].num_data_points;
+	memcpy(caps->data_points, custom_backlight_profiles[config_no].data_points, data_points_size);
+	return true;
+}
+
+void reset_replay_dsync_error_count(struct dc_link *link)
+{
+	link->replay_settings.replay_desync_error_fail_count = 0;
 }

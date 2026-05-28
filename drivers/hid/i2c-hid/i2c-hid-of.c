@@ -87,6 +87,7 @@ static int i2c_hid_of_probe(struct i2c_client *client)
 	if (!ihid_of)
 		return -ENOMEM;
 
+	ihid_of->client = client;
 	ihid_of->ops.power_up = i2c_hid_of_power_up;
 	ihid_of->ops.power_down = i2c_hid_of_power_down;
 
@@ -143,9 +144,9 @@ MODULE_DEVICE_TABLE(of, i2c_hid_of_match);
 #endif
 
 static const struct i2c_device_id i2c_hid_of_id_table[] = {
-	{ "hid", 0 },
-	{ "hid-over-i2c", 0 },
-	{ },
+	{ "hid" },
+	{ "hid-over-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, i2c_hid_of_id_table);
 
@@ -157,7 +158,7 @@ static struct i2c_driver i2c_hid_of_driver = {
 		.of_match_table = of_match_ptr(i2c_hid_of_match),
 	},
 
-	.probe_new	= i2c_hid_of_probe,
+	.probe		= i2c_hid_of_probe,
 	.remove		= i2c_hid_core_remove,
 	.shutdown	= i2c_hid_core_shutdown,
 	.id_table	= i2c_hid_of_id_table,

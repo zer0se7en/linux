@@ -25,6 +25,8 @@
 #define ADF_STATUS_AE_STARTED 6
 #define ADF_STATUS_PF_RUNNING 7
 #define ADF_STATUS_IRQ_ALLOCATED 8
+#define ADF_STATUS_CRYPTO_ALGS_REGISTERED 9
+#define ADF_STATUS_COMP_ALGS_REGISTERED 10
 
 enum adf_dev_reset_mode {
 	ADF_DEV_RESET_ASYNC = 0,
@@ -38,6 +40,7 @@ enum adf_event {
 	ADF_EVENT_SHUTDOWN,
 	ADF_EVENT_RESTARTING,
 	ADF_EVENT_RESTARTED,
+	ADF_EVENT_FATAL_ERROR,
 };
 
 struct service_hndl {
@@ -53,24 +56,19 @@ int adf_service_register(struct service_hndl *service);
 int adf_service_unregister(struct service_hndl *service);
 
 int adf_dev_up(struct adf_accel_dev *accel_dev, bool init_config);
-int adf_dev_down(struct adf_accel_dev *accel_dev, bool cache_config);
+int adf_dev_down(struct adf_accel_dev *accel_dev);
 int adf_dev_restart(struct adf_accel_dev *accel_dev);
 
 void adf_devmgr_update_class_index(struct adf_hw_device_data *hw_data);
 void adf_clean_vf_map(bool);
-
-int adf_ctl_dev_register(void);
-void adf_ctl_dev_unregister(void);
-int adf_processes_dev_register(void);
-void adf_processes_dev_unregister(void);
-
+int adf_notify_fatal_error(struct adf_accel_dev *accel_dev);
+void adf_error_notifier(struct adf_accel_dev *accel_dev);
 int adf_devmgr_add_dev(struct adf_accel_dev *accel_dev,
 		       struct adf_accel_dev *pf);
 void adf_devmgr_rm_dev(struct adf_accel_dev *accel_dev,
 		       struct adf_accel_dev *pf);
 struct list_head *adf_devmgr_get_head(void);
 struct adf_accel_dev *adf_devmgr_get_dev_by_id(u32 id);
-struct adf_accel_dev *adf_devmgr_get_first(void);
 struct adf_accel_dev *adf_devmgr_pci_to_accel_dev(struct pci_dev *pci_dev);
 int adf_devmgr_verify_id(u32 id);
 void adf_devmgr_get_num_dev(u32 *num);
@@ -91,13 +89,10 @@ void adf_reset_flr(struct adf_accel_dev *accel_dev);
 void adf_dev_restore(struct adf_accel_dev *accel_dev);
 int adf_init_aer(void);
 void adf_exit_aer(void);
-int adf_init_admin_comms(struct adf_accel_dev *accel_dev);
-void adf_exit_admin_comms(struct adf_accel_dev *accel_dev);
-int adf_send_admin_init(struct adf_accel_dev *accel_dev);
-int adf_init_admin_pm(struct adf_accel_dev *accel_dev, u32 idle_delay);
 int adf_init_arb(struct adf_accel_dev *accel_dev);
 void adf_exit_arb(struct adf_accel_dev *accel_dev);
 void adf_update_ring_arb(struct adf_etr_ring_data *ring);
+int adf_disable_arb_thd(struct adf_accel_dev *accel_dev, u32 ae, u32 thr);
 
 int adf_dev_get(struct adf_accel_dev *accel_dev);
 void adf_dev_put(struct adf_accel_dev *accel_dev);
@@ -116,12 +111,12 @@ void qat_algs_unregister(void);
 int qat_asym_algs_register(void);
 void qat_asym_algs_unregister(void);
 
-struct qat_compression_instance *qat_compression_get_instance_node(int node);
+struct qat_compression_instance *qat_compression_get_instance_node(int node, int alg);
 void qat_compression_put_instance(struct qat_compression_instance *inst);
 int qat_compression_register(void);
 int qat_compression_unregister(void);
-int qat_comp_algs_register(void);
-void qat_comp_algs_unregister(void);
+int qat_comp_algs_register(u32 caps);
+void qat_comp_algs_unregister(u32 caps);
 void qat_comp_alg_callback(void *resp);
 
 int adf_isr_resource_alloc(struct adf_accel_dev *accel_dev);
@@ -178,8 +173,6 @@ int qat_hal_init_rd_xfer(struct icp_qat_fw_loader_handle *handle,
 int qat_hal_init_nn(struct icp_qat_fw_loader_handle *handle,
 		    unsigned char ae, unsigned long ctx_mask,
 		    unsigned short reg_num, unsigned int regdata);
-int qat_hal_wr_lm(struct icp_qat_fw_loader_handle *handle,
-		  unsigned char ae, unsigned short lm_addr, unsigned int value);
 void qat_hal_set_ae_tindex_mode(struct icp_qat_fw_loader_handle *handle,
 				unsigned char ae, unsigned char mode);
 int qat_uclo_wr_all_uimage(struct icp_qat_fw_loader_handle *handle);
@@ -187,15 +180,19 @@ void qat_uclo_del_obj(struct icp_qat_fw_loader_handle *handle);
 int qat_uclo_wr_mimage(struct icp_qat_fw_loader_handle *handle, void *addr_ptr,
 		       int mem_size);
 int qat_uclo_map_obj(struct icp_qat_fw_loader_handle *handle,
-		     void *addr_ptr, u32 mem_size, char *obj_name);
+		     void *addr_ptr, u32 mem_size, const char *obj_name);
 int qat_uclo_set_cfg_ae_mask(struct icp_qat_fw_loader_handle *handle,
 			     unsigned int cfg_ae_mask);
 int adf_init_misc_wq(void);
 void adf_exit_misc_wq(void);
 bool adf_misc_wq_queue_work(struct work_struct *work);
+bool adf_misc_wq_queue_delayed_work(struct delayed_work *work,
+				    unsigned long delay);
+void adf_misc_wq_flush(void);
 #if defined(CONFIG_PCI_IOV)
 int adf_sriov_configure(struct pci_dev *pdev, int numvfs);
 void adf_disable_sriov(struct adf_accel_dev *accel_dev);
+void adf_reenable_sriov(struct adf_accel_dev *accel_dev);
 void adf_enable_vf2pf_interrupts(struct adf_accel_dev *accel_dev, u32 vf_mask);
 void adf_disable_all_vf2pf_interrupts(struct adf_accel_dev *accel_dev);
 bool adf_recv_and_handle_pf2vf_msg(struct adf_accel_dev *accel_dev);
@@ -213,6 +210,10 @@ void adf_flush_vf_wq(struct adf_accel_dev *accel_dev);
 #define adf_sriov_configure NULL
 
 static inline void adf_disable_sriov(struct adf_accel_dev *accel_dev)
+{
+}
+
+static inline void adf_reenable_sriov(struct adf_accel_dev *accel_dev)
 {
 }
 
@@ -244,6 +245,26 @@ static inline void __iomem *adf_get_pmisc_base(struct adf_accel_dev *accel_dev)
 	pmisc = &GET_BARS(accel_dev)[hw_data->get_misc_bar_id(hw_data)];
 
 	return pmisc->virt_addr;
+}
+
+static inline void __iomem *adf_get_etr_base(struct adf_accel_dev *accel_dev)
+{
+	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
+	struct adf_bar *etr;
+
+	etr = &GET_BARS(accel_dev)[hw_data->get_etr_bar_id(hw_data)];
+
+	return etr->virt_addr;
+}
+
+static inline void __iomem *adf_get_aram_base(struct adf_accel_dev *accel_dev)
+{
+	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
+	struct adf_bar *param;
+
+	param = &GET_BARS(accel_dev)[hw_data->get_sram_bar_id(hw_data)];
+
+	return param->virt_addr;
 }
 
 #endif
